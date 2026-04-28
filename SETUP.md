@@ -54,6 +54,15 @@ Confirm `which bridge` resolves and that the binary is executable. The Cowork pl
 
 ### 4. Populate `./.env` at the repo root
 
+The fast path is the bootstrap script, which copies `configs/bridge.env.example` to `.env`, rewrites the placeholder allowlist path to this clone's absolute path, and sets mode `0600`:
+
+```sh
+./scripts/bootstrap.sh
+$EDITOR .env   # paste GH_PAT
+```
+
+It refuses to overwrite an existing `.env`. Manual equivalent if the script can't run on your platform:
+
 ```sh
 cp configs/bridge.env.example .env
 chmod 600 .env
@@ -61,7 +70,7 @@ chmod 600 .env
 
 The `.env` is gitignored (see `.gitignore`); the committed reference file is `configs/bridge.env.example`. Living next to the code keeps the PAT one `cd` away from the rest of the project — at the cost that the Cowork sandbox, which mounts the working tree read-only, can read it. Acceptable because the PAT's scope is fine-grained (this repo only, contents+actions); the `~/.claude-deployable/.env` location used in earlier drafts kept the secret host-only at the cost of an extra directory to remember.
 
-Edit the file:
+Fields to set (the script handles `CLAUDE_DEPLOYABLE_ALLOWLIST` for you):
 
 - `CLAUDE_DEPLOYABLE_ALLOWLIST` — comma-separated absolute paths to the working copies the bridge is allowed to touch. Anything outside this list is rejected with `outside_allowlist`. For a single-repo setup, this is just the absolute path to this repo.
 - `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` — leave as `claude-agent` unless you have a reason to change. These land on every commit the bridge makes.

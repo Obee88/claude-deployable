@@ -17,22 +17,25 @@ GitHub → Settings → Developer settings → **Fine-grained personal access to
 
 Copy the token value once — GitHub won't show it again.
 
-## 2. Create `.env` at the repo root and paste the PAT
-
-The `.env` is gitignored (see `.gitignore`); the committed reference file is `configs/bridge.env.example`. Create your local copy from it:
+## 2. Run the bootstrap script and paste the PAT
 
 ```sh
 cd ~/coding/claude-deployable          # or wherever you cloned to
+./scripts/bootstrap.sh
+$EDITOR .env                           # paste your GH_PAT
+```
+
+`bootstrap.sh` copies `configs/bridge.env.example` to `.env` (which is gitignored), rewrites the placeholder allowlist path to this clone's absolute path, and sets mode `0600`. It refuses to overwrite an existing `.env` so a working setup can't be clobbered. The one field it can't fill in is the PAT — open the file and replace `GH_PAT=ghp_replace_me` with the token from step 1.
+
+Manual fallback if the script can't run on your platform:
+
+```sh
 cp configs/bridge.env.example .env
 chmod 600 .env
 $EDITOR .env
 ```
 
-Fill in:
-
-- `GH_PAT=` — paste the token from step 1.
-- `CLAUDE_DEPLOYABLE_ALLOWLIST=` — the absolute path to this clone (e.g. `/Users/you/coding/claude-deployable`). Comma-separated if you have more than one repo the bridge should drive.
-- Leave `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` as `claude-agent` unless you have a reason to change. These land on every commit the bridge makes.
+Then set `CLAUDE_DEPLOYABLE_ALLOWLIST` to the absolute path of this clone (comma-separated if you want the bridge to drive more than one repo), paste the PAT into `GH_PAT=`, and leave `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` as `claude-agent` unless you have a reason to change them — they land on every commit the bridge makes.
 
 That's it for the quickstart. The bridge auto-discovers the `.env` at runtime by walking up from its working directory until it finds a `.git/` entry; the `.env` next to that is taken to be the bridge's config. So as long as Cowork spawns the bridge with cwd anywhere inside this repo, no per-machine path lives in `.mcp.json`. If your setup is unusual and discovery fails, set `CLAUDE_DEPLOYABLE_ENV` to an absolute path in the plugin spec's `env` block as an explicit override.
 
