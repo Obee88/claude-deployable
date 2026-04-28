@@ -1,0 +1,5 @@
+{
+  "name": "claude-deployable-bridge",
+  "version": "0.1.0",
+  "description": "Local bridge for the claude-deployable template: gives Cowork agents host-side git + GitHub-CI tooling for the repos in the bridge allowlist."
+}

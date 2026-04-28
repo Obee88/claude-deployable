@@ -1,0 +1,9 @@
+{
+  "bridge": {
+    "command": "bridge",
+    "args": [],
+    "env": {
+      "CLAUDE_DEPLOYABLE_ENV": "/REPLACE_ME/path/to/your/claude-deployable/.env"
+    }
+  }
+}
