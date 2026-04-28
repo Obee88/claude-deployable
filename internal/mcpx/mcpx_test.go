@@ -92,8 +92,16 @@ func TestResolveAllowed(t *testing.T) {
 	if err := os.MkdirAll(repo, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// In production LoadConfig resolves symlinks before storing
+	// allowlist entries.  Mirror that here — on macOS, t.TempDir()
+	// returns /var/... which symlinks to /private/var/..., and
+	// ResolveAllowed always returns the resolved form.
+	repoResolved, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := Config{
-		Allowlist:     []string{repo},
+		Allowlist:     []string{repoResolved},
 		IdentityName:  "x",
 		IdentityEmail: "x@y",
 	}
@@ -102,8 +110,8 @@ func TestResolveAllowed(t *testing.T) {
 	if e != nil {
 		t.Fatalf("ResolveAllowed: %+v", e)
 	}
-	if abs != repo {
-		t.Errorf("abs = %q, want %q", abs, repo)
+	if abs != repoResolved {
+		t.Errorf("abs = %q, want %q", abs, repoResolved)
 	}
 
 	// Outside the allowlist → CodeOutsideAllowlist.
@@ -255,8 +263,14 @@ func TestResolveAllowedFollowsSymlinks(t *testing.T) {
 	if err := os.Symlink(real, link); err != nil {
 		t.Skip("symlinks not supported on this platform")
 	}
+	// Same fix as TestResolveAllowed: store the fully-resolved path
+	// in the allowlist (LoadConfig does this for real env files).
+	realResolved, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := Config{
-		Allowlist:     []string{real},
+		Allowlist:     []string{realResolved},
 		IdentityName:  "x",
 		IdentityEmail: "x@y",
 	}
@@ -264,7 +278,7 @@ func TestResolveAllowedFollowsSymlinks(t *testing.T) {
 	if e != nil {
 		t.Fatalf("ResolveAllowed via symlink: %+v", e)
 	}
-	if abs != real {
-		t.Errorf("abs = %q, want %q (resolved through symlink)", abs, real)
+	if abs != realResolved {
+		t.Errorf("abs = %q, want %q (resolved through symlink)", abs, realResolved)
 	}
 }
