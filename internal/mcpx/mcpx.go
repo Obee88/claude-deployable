@@ -105,25 +105,30 @@ func (c Config) Summary() map[string]any {
 	}
 }
 
-// LoadConfig reads a KEY=VALUE env file and returns a Config.  Path
-// defaults to $HOME/.claude-deployable/.env, overridable via
-// CLAUDE_DEPLOYABLE_ENV.  Missing file is fatal — the bridge cannot
-// operate without an allowlist.
+// LoadConfig reads a KEY=VALUE env file and returns a Config.  When
+// `path` is empty the loader discovers the file in this order:
+//
+//  1. $CLAUDE_DEPLOYABLE_ENV — explicit override, used as-is.
+//  2. The .env at the root of the nearest enclosing git repo (walk up
+//     from cwd until we find a .git/ entry; if .env sits next to it,
+//     that's our config).  The .git/ boundary keeps us from picking up
+//     a stray .env in $HOME or /etc.
+//  3. .env next to the bridge binary.
+//  4. $HOME/.claude-deployable/.env — the legacy host-only location,
+//     kept as a final fallback for forkers who prefer host-side secrets.
+//
+// Missing file is fatal — the bridge cannot operate without an
+// allowlist.
 //
 // The file should be mode 0600.  We log a warning to stderr if it isn't,
 // but proceed; treating it as fatal would be unfriendly during initial
 // setup.
 func LoadConfig(path string) (Config, error) {
 	if path == "" {
-		if env := os.Getenv("CLAUDE_DEPLOYABLE_ENV"); env != "" {
-			path = env
-		} else {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return Config{}, fmt.Errorf("locate home dir: %w", err)
-			}
-			path = filepath.Join(home, ".claude-deployable", ".env")
-		}
+		path = discoverEnvPath()
+	}
+	if path == "" {
+		return Config{}, errors.New("could not locate bridge env file: set CLAUDE_DEPLOYABLE_ENV or place .env at the repo root")
 	}
 
 	f, err := os.Open(path)
@@ -177,6 +182,55 @@ func LoadConfig(path string) (Config, error) {
 		return Config{}, errors.New("GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL must both be set")
 	}
 	return cfg, nil
+}
+
+// discoverEnvPath returns the bridge env-file path using the search
+// order documented on LoadConfig.  Returns "" only if every candidate
+// fails (no env override, no enclosing git repo with a .env, no .env
+// next to the binary, and no home dir).
+func discoverEnvPath() string {
+	if env := os.Getenv("CLAUDE_DEPLOYABLE_ENV"); env != "" {
+		return env
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		if root := findRepoRoot(cwd); root != "" {
+			candidate := filepath.Join(root, ".env")
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate
+			}
+		}
+	}
+	if exe, err := os.Executable(); err == nil {
+		candidate := filepath.Join(filepath.Dir(exe), ".env")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidate := filepath.Join(home, ".claude-deployable", ".env")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// findRepoRoot walks up from `start` looking for a .git entry (file or
+// directory; both are valid — submodules and worktrees use a .git
+// file).  Returns "" if none is found before hitting the filesystem
+// root.  The 30-hop cap is paranoia against pathological symlink loops.
+func findRepoRoot(start string) string {
+	for i := 0; i < 30; i++ {
+		if _, err := os.Stat(filepath.Join(start, ".git")); err == nil {
+			return start
+		}
+		parent := filepath.Dir(start)
+		if parent == start {
+			return ""
+		}
+		start = parent
+	}
+	return ""
 }
 
 // ResolveAllowed validates that `repoArg` resolves (after symlink and

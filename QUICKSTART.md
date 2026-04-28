@@ -1,6 +1,6 @@
 # claude-deployable — quickstart
 
-The three things every fresh clone needs before the bridge can talk to GitHub. After these, follow `SETUP.md` to build the binary and install the Cowork plugin.
+The two things every fresh clone needs before the bridge can talk to GitHub. After these, follow `SETUP.md` to build the binary and install the Cowork plugin.
 
 Assumes you've already cloned this repo to your laptop, e.g. `~/coding/claude-deployable`.
 
@@ -34,25 +34,7 @@ Fill in:
 - `CLAUDE_DEPLOYABLE_ALLOWLIST=` — the absolute path to this clone (e.g. `/Users/you/coding/claude-deployable`). Comma-separated if you have more than one repo the bridge should drive.
 - Leave `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` as `claude-agent` unless you have a reason to change. These land on every commit the bridge makes.
 
-## 3. Point the Cowork plugin at your `.env`
-
-Edit `deploy/cowork-plugin/.mcp.json` and replace the `/REPLACE_ME/...` placeholder with the absolute path to the `.env` you just created:
-
-```json
-{
-  "bridge": {
-    "command": "bridge",
-    "args": [],
-    "env": {
-      "CLAUDE_DEPLOYABLE_ENV": "/Users/you/coding/claude-deployable/.env"
-    }
-  }
-}
-```
-
-This change is per-machine (your absolute path won't match anyone else's), so don't commit it back to `main`. Either leave the working tree dirty, stash it, or run `git update-index --skip-worktree deploy/cowork-plugin/.mcp.json` to keep git from tracking your local edit. The placeholder on `main` is what new forkers should see when they clone.
-
-If you forget step 3, the bridge fails loudly at startup with a config-load error pointing at `/REPLACE_ME/...` — by design.
+That's it for the quickstart. The bridge auto-discovers the `.env` at runtime by walking up from its working directory until it finds a `.git/` entry; the `.env` next to that is taken to be the bridge's config. So as long as Cowork spawns the bridge with cwd anywhere inside this repo, no per-machine path lives in `.mcp.json`. If your setup is unusual and discovery fails, set `CLAUDE_DEPLOYABLE_ENV` to an absolute path in the plugin spec's `env` block as an explicit override.
 
 ## What's next
 

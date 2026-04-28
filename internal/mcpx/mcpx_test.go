@@ -120,6 +120,131 @@ func TestResolveAllowed(t *testing.T) {
 	}
 }
 
+// TestDiscoverEnvPathFindsRepoEnv simulates the common case: the user
+// runs the bridge from somewhere inside a git repo whose root contains
+// a .env.  Discovery should walk up to the .git/ boundary and return
+// that .env regardless of which subdirectory we started from.
+func TestDiscoverEnvPathFindsRepoEnv(t *testing.T) {
+	t.Setenv("CLAUDE_DEPLOYABLE_ENV", "")
+
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	envPath := filepath.Join(repo, ".env")
+	writeEnv(t, envPath, `GIT_AUTHOR_NAME=claude-agent
+GIT_AUTHOR_EMAIL=claude-agent@users.noreply.github.com
+GH_PAT=tok
+CLAUDE_DEPLOYABLE_ALLOWLIST=`+repo+`
+`)
+	// Drop into a nested subdir; discovery should still find the
+	// repo-root .env via the walk-up.
+	sub := filepath.Join(repo, "a", "b", "c")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(sub)
+
+	got := discoverEnvPath()
+	// EvalSymlinks resolves macOS /var → /private/var; compare resolved.
+	wantResolved, _ := filepath.EvalSymlinks(envPath)
+	gotResolved, _ := filepath.EvalSymlinks(got)
+	if gotResolved != wantResolved {
+		t.Errorf("discoverEnvPath = %q, want %q", got, envPath)
+	}
+
+	// And LoadConfig with no explicit path goes through the same
+	// discovery, so this end-to-end works too.
+	if _, err := LoadConfig(""); err != nil {
+		t.Errorf("LoadConfig(\"\") with discovered .env: %v", err)
+	}
+}
+
+// TestDiscoverEnvPathRespectsExplicitOverride confirms that
+// $CLAUDE_DEPLOYABLE_ENV beats the walk-up.  Useful when a forker wants
+// to keep secrets outside the working tree.
+func TestDiscoverEnvPathRespectsExplicitOverride(t *testing.T) {
+	repo := t.TempDir()
+	os.MkdirAll(filepath.Join(repo, ".git"), 0o755)
+	repoEnv := filepath.Join(repo, ".env")
+	writeEnv(t, repoEnv, "GH_PAT=should_not_be_used\n")
+
+	overrideDir := t.TempDir()
+	overridePath := filepath.Join(overrideDir, "elsewhere.env")
+	writeEnv(t, overridePath, "GH_PAT=override_wins\n")
+
+	t.Chdir(repo)
+	t.Setenv("CLAUDE_DEPLOYABLE_ENV", overridePath)
+
+	if got := discoverEnvPath(); got != overridePath {
+		t.Errorf("discoverEnvPath = %q, want %q (env override should win over walk-up)", got, overridePath)
+	}
+}
+
+// TestDiscoverEnvPathStopsAtGitBoundary protects against the footgun of
+// picking up a stray .env in $HOME or some unrelated parent dir.  If
+// there's no enclosing git repo, the walk-up MUST NOT return a .env
+// found higher up the tree.
+func TestDiscoverEnvPathStopsAtGitBoundary(t *testing.T) {
+	t.Setenv("CLAUDE_DEPLOYABLE_ENV", "")
+
+	// Simulated layout:
+	//   <root>/.env             ← stray, unrelated
+	//   <root>/sub/...          ← cwd, no .git/ anywhere upward
+	root := t.TempDir()
+	writeEnv(t, filepath.Join(root, ".env"), "GH_PAT=stray\n")
+	sub := filepath.Join(root, "sub", "deeper")
+	os.MkdirAll(sub, 0o755)
+	t.Chdir(sub)
+
+	got := discoverEnvPath()
+	// Without .git/, the walk-up must not return root/.env.  The
+	// allowed fallbacks are exe-dir or $HOME/.claude-deployable/.env;
+	// either way, it must not be the stray file at root.
+	if strayResolved, _ := filepath.EvalSymlinks(filepath.Join(root, ".env")); strayResolved != "" {
+		gotResolved, _ := filepath.EvalSymlinks(got)
+		if gotResolved == strayResolved {
+			t.Errorf("walk-up returned stray .env at %q with no .git/ boundary", got)
+		}
+	}
+}
+
+// TestFindRepoRoot exercises the boundary: .git/ present, .git/ as a
+// file (worktree shape), and no .git/ at all.
+func TestFindRepoRoot(t *testing.T) {
+	t.Run("dir", func(t *testing.T) {
+		root := t.TempDir()
+		os.MkdirAll(filepath.Join(root, ".git"), 0o755)
+		sub := filepath.Join(root, "a", "b")
+		os.MkdirAll(sub, 0o755)
+		got := findRepoRoot(sub)
+		gotR, _ := filepath.EvalSymlinks(got)
+		wantR, _ := filepath.EvalSymlinks(root)
+		if gotR != wantR {
+			t.Errorf("findRepoRoot = %q, want %q", got, root)
+		}
+	})
+	t.Run("file", func(t *testing.T) {
+		// .git as a file (worktree pattern) should also count.
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: ../foo\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := findRepoRoot(root)
+		gotR, _ := filepath.EvalSymlinks(got)
+		wantR, _ := filepath.EvalSymlinks(root)
+		if gotR != wantR {
+			t.Errorf("findRepoRoot (.git file) = %q, want %q", got, root)
+		}
+	})
+	t.Run("none", func(t *testing.T) {
+		root := t.TempDir()
+		if got := findRepoRoot(root); got != "" {
+			t.Errorf("findRepoRoot with no .git = %q, want empty", got)
+		}
+	})
+}
+
 func TestResolveAllowedFollowsSymlinks(t *testing.T) {
 	dir := t.TempDir()
 	real := filepath.Join(dir, "real")

@@ -12,7 +12,7 @@ This document covers the **Milestone 1** slice only: getting the bridge running 
 
 - A `bridge` binary on `$PATH`.
 - A `.env` at the **repo root** (gitignored) populated with your PAT and repo allowlist.
-- The `claude-deployable-bridge` plugin installed in Cowork, with `CLAUDE_DEPLOYABLE_ENV` pointing at that `.env`.
+- The `claude-deployable-bridge` plugin installed in Cowork. The bridge auto-discovers `.env` by walking up from cwd to the nearest `.git/` boundary, so `.mcp.json` ships path-free.
 - A Cowork session can call `git_status`, `git_pull`, `git_branch`, `git_commit`, `git_push`, `git_reset`, `git_abort` against the allowlisted repo, and the resulting commit shows up on GitHub authored as `claude-agent <claude-agent@users.noreply.github.com>`.
 
 ### Prerequisites
@@ -73,7 +73,14 @@ The bridge logs a warning to stderr if the file is not mode `0600`, but it still
 
 The plugin lives under `deploy/cowork-plugin/`. Its layout matches Cowork's empirical convention (`.claude-plugin/plugin.json` for metadata, sibling `.mcp.json` for the MCP server registration).
 
-Before installing, edit `deploy/cowork-plugin/.mcp.json` and replace the `CLAUDE_DEPLOYABLE_ENV` placeholder with the absolute path to the `.env` you just created:
+No edits to `.mcp.json` are required for the common case. The bridge discovers its `.env` at startup by walking up from its current working directory looking for a `.git/` entry; if a `.env` sits next to that `.git/`, it's loaded as the bridge config. The discovery order is:
+
+1. `$CLAUDE_DEPLOYABLE_ENV` if set — explicit override, used as-is.
+2. `.env` at the root of the nearest enclosing git repo (the common case).
+3. `.env` next to the `bridge` binary (handy if you keep a personal env file alongside the binary in `~/.local/bin/`).
+4. `~/.claude-deployable/.env` — legacy host-only fallback.
+
+The `.git/` boundary in step 2 keeps the bridge from accidentally picking up an unrelated `.env` in `$HOME` or `/etc`. If your setup defeats discovery (e.g., Cowork spawns the bridge with cwd outside this repo on your platform), add an explicit override to the plugin's `.mcp.json`:
 
 ```json
 {
@@ -87,7 +94,7 @@ Before installing, edit `deploy/cowork-plugin/.mcp.json` and replace the `CLAUDE
 }
 ```
 
-The placeholder `/REPLACE_ME/...` will fail loudly at bridge startup if you forget to edit it (config-load error 2 with the path in the log). This `.mcp.json` change is per-machine, so commit it locally only if you intend to share that absolute path — for a fork-template, leave the placeholder in `main` so other forkers see it.
+That `env` block is per-machine, so don't commit it back to `main` — leave the path-free version in the template.
 
 Install via the Cowork UI's plugin install flow, pointing at the `deploy/cowork-plugin/` directory. After install, restart Cowork (or reload the plugin) so it spawns the bridge.
 

@@ -37,7 +37,7 @@ Concretely the agent should be able to:
 | Branch policy | Direct commits/pushes to `main` — deliberate solo-project choice; moving to a PR flow is an architectural change, not a silent upgrade |
 | Deploy mechanism | `docker compose` with images pulled from GHCR; VPS runs `docker login ghcr.io` once at install time using a `read:packages` PAT |
 | Concurrency | Per-repo mutex in the bridge around any working-state mutation; CI-read tool calls are not gated by the mutex |
-| Secrets | `<repo>/.env` (mode `0600`, gitignored) for the bridge, loaded at process start. The path is passed to the bridge via `CLAUDE_DEPLOYABLE_ENV` set in the Cowork plugin's `.mcp.json` `env` block. Tradeoff: the working tree is mounted into the Cowork sandbox, so the sandbox can read the PAT directly; the bridge is no longer the sole credential perimeter. Mitigated by the PAT's narrow scope (allowlisted repo, contents+actions only). `EnvironmentFile=` for the VPS systemd unit |
+| Secrets | `<repo>/.env` (mode `0600`, gitignored) for the bridge, loaded at process start. The bridge auto-discovers it by walking up from cwd to the nearest `.git/` boundary; `$CLAUDE_DEPLOYABLE_ENV` is the explicit override. The plugin spec ships path-free so `.mcp.json` is portable across forks. Tradeoff: the working tree is mounted into the Cowork sandbox, so the sandbox can read the PAT directly; the bridge is no longer the sole credential perimeter. Mitigated by the PAT's narrow scope (allowlisted repo, contents+actions only). `EnvironmentFile=` for the VPS systemd unit |
 
 ## Architecture
 
@@ -212,9 +212,10 @@ process. There is no network or filesystem listener — the only way to
 invoke the bridge is for Cowork to have launched it. OS-user isolation is
 the perimeter; any attacker who can spawn processes as the user can
 already do everything the bridge does. Secrets live in `<repo>/.env`
-with mode `0600` (gitignored), loaded at process start; the path is
-provided to the bridge via the `CLAUDE_DEPLOYABLE_ENV` env var set in the
-Cowork plugin's `.mcp.json`. The repo allowlist loaded from that env
+with mode `0600` (gitignored), loaded at process start. The bridge
+discovers the env file by walking up from cwd to the nearest `.git/`
+boundary; `$CLAUDE_DEPLOYABLE_ENV` is the explicit override and the
+plugin spec ships path-free. The repo allowlist loaded from that env
 file is the bridge's internal gate: any tool call with a `repo` argument
 outside the allowlist is rejected.
 
@@ -227,9 +228,9 @@ PAT's scope is fine-grained (allowlisted repos only, `contents:write` +
 couldn't already obtain by calling `git_push` through the bridge — only
 the ability to make API calls outside the bridge's curated tool surface.
 Forkers who want host-only secret storage can move the file to
-`~/.claude-deployable/.env` (or anywhere else) and update
-`CLAUDE_DEPLOYABLE_ENV` in their plugin spec accordingly; the bridge
-loader is location-agnostic.
+`~/.claude-deployable/.env` (or anywhere else) and either rely on the
+loader's home-dir fallback or set `CLAUDE_DEPLOYABLE_ENV` in their
+plugin spec; the bridge loader is location-agnostic.
 
 The push PAT is the blast-radius ceiling for a compromised bridge: it is a
 fine-grained PAT scoped only to the repos in the allowlist, with only the
