@@ -1,8 +1,8 @@
 # claude-deployable — quickstart
 
-The two things every fresh clone needs before the bridge can talk to GitHub. After these, follow `SETUP.md` to build the binary and install the Cowork plugin.
+The three things every fresh clone needs to get from `git clone` to a working bridge binary. After these, follow `SETUP.md` to install the Cowork plugin and run the closeout round-trip.
 
-Assumes you've already cloned this repo to your laptop, e.g. `~/coding/claude-deployable`.
+Assumes you've already cloned this repo to your laptop, e.g. `~/coding/claude-deployable`, and have Go 1.25+ on `$PATH`.
 
 ## 1. Mint a fine-grained GitHub PAT
 
@@ -37,8 +37,19 @@ $EDITOR .env
 
 Then set `CLAUDE_DEPLOYABLE_ALLOWLIST` to the absolute path of this clone (comma-separated if you want the bridge to drive more than one repo), paste the PAT into `GH_PAT=`, and leave `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` as `claude-agent` unless you have a reason to change them — they land on every commit the bridge makes.
 
-That's it for the quickstart. The bridge auto-discovers the `.env` at runtime by walking up from its working directory until it finds a `.git/` entry; the `.env` next to that is taken to be the bridge's config. So as long as Cowork spawns the bridge with cwd anywhere inside this repo, no per-machine path lives in `.mcp.json`. If your setup is unusual and discovery fails, set `CLAUDE_DEPLOYABLE_ENV` to an absolute path in the plugin spec's `env` block as an explicit override.
+## 3. Build the bridge binary
+
+```sh
+go build -o ~/.local/bin/bridge ./cmd/bridge
+bridge </dev/null; echo "exit=$?"
+```
+
+The second line feeds an empty stdin so the MCP server starts, sees EOF, and exits cleanly. A healthy run prints one JSON line with `gh_pat_present: true`, your allowlist, and the `claude-agent` identity, then `exit=0`. If you see `bridge: config error: ...` instead, the `.env` didn't validate — re-check step 2.
+
+`~/.local/bin` needs to be on `$PATH` (it usually is on macOS via `/etc/paths.d/`); the Cowork plugin spec calls `bridge` by basename, so anywhere on `$PATH` works.
+
+The bridge auto-discovers the `.env` at runtime by walking up from its working directory until it finds a `.git/` entry; the `.env` next to that is taken to be the bridge's config. So as long as Cowork spawns the bridge with cwd anywhere inside this repo, no per-machine path lives in `.mcp.json`. If your setup is unusual and discovery fails, set `CLAUDE_DEPLOYABLE_ENV` to an absolute path in the plugin spec's `env` block as an explicit override.
 
 ## What's next
 
-`SETUP.md` picks up from here: build the bridge binary, install the Cowork plugin, restart Cowork, and run the closeout test (an agent-driven `git_commit` + `git_push` round-trip from a Cowork session).
+`SETUP.md` picks up from here: install the Cowork plugin, restart Cowork, and run the closeout test (an agent-driven `git_commit` + `git_push` round-trip from a Cowork session).
