@@ -52,7 +52,7 @@ milestone has a coherent, usable subset.
 
 Built milestone-by-milestone (see `PLAN.md`):
 
-- **M1 — Agent commits and pushes from the sandbox.** *Current.*
+- **M1 — Agent commits and pushes from the sandbox.** *Shipped.*
   No Go code yet; the milestone is docs, the `ship-a-change` skill,
   and `.env.example`.
 - **M2 — GitHub Actions deploys a dummy container after agent
