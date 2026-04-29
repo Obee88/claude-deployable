@@ -1,15 +1,9 @@
-# Bridge runtime config — contains the GH_PAT, lives at the repo root by
-# design (see SETUP.md §4 and PLAN.md "secrets" decision row).  Must
-# never be committed.  The committed reference is configs/bridge.env.example.
+# Sandbox-native git config — contains GH_PAT.  Lives at the repo root
+# by design (see SETUP.md and PLAN.md security section).  The committed
+# reference is .env.example; the working .env must never be committed.
 .env
 .env.local
 .env.*.local
-
-# Built binaries.  `go build -o ./bridge ./cmd/bridge` and equivalents
-# for the VPS agent should not be tracked.
-/bridge
-/vps-agent
-*.exe
 
 # Editor / OS cruft
 .DS_Store
@@ -17,8 +11,3 @@
 .vscode/
 *.swp
 *~
-
-# Go test / coverage artefacts
-*.test
-*.out
-coverage.txt

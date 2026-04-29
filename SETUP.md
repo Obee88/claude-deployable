@@ -1,147 +1,176 @@
 # claude-deployable — setup
 
-A human-facing checklist for getting the template running on a fresh machine. Follow the milestone slices in order; each one ends at a working subset (per `PLAN.md`).
+A human-facing checklist for getting the template running on a fresh
+fork. Follow the milestone slices in order; each one ends at a
+working subset (per `PLAN.md`). M1 is small and entirely
+configuration — no binaries to build, no host-side process to install.
 
-This document covers the **Milestone 1** slice only: getting the bridge running locally so a Cowork agent can commit, push, and pull against a real GitHub repo. M2 (CI feedback + dummy deploy) and M3 (VPS agent) are added in their own slices later.
+This document covers the **Milestone 1** slice only: a Cowork agent
+in the connected working folder can edit files, commit as
+`claude-agent`, and push to GitHub. M2 (GitHub-Actions deploy of a
+dummy container) and M3 (VPS agent for CI logs and container
+introspection) are added in their own slices later.
 
 ---
 
-## Milestone 1 — bridge wired to GitHub
+## Milestone 1 — agent commits and pushes from the sandbox
 
 ### What you'll have at the end
 
-- A `bridge` binary on `$PATH`.
-- A `.env` at the **repo root** (gitignored) populated with your PAT and repo allowlist.
-- The `claude-deployable-bridge` plugin installed in Cowork. The bridge auto-discovers `.env` by walking up from cwd to the nearest `.git/` boundary, so `.mcp.json` ships path-free.
-- A Cowork session can call `git_status`, `git_pull`, `git_branch`, `git_commit`, `git_push`, `git_reset`, `git_abort` against the allowlisted repo, and the resulting commit shows up on GitHub authored as `claude-agent <claude-agent@users.noreply.github.com>`.
+- A GitHub repo (typically a fork of this template) with a
+  fine-grained PAT scoped to it.
+- A `.env` at the repo root (gitignored, mode `0600`) populated with
+  the PAT and identity.
+- The Cowork session connected to the working folder, with the
+  `allow_cowork_file_delete` grant in place.
+- A real commit on `main` authored as `claude-agent
+  <claude-agent@users.noreply.github.com>`, made by the agent
+  end-to-end via the `ship-a-change` skill.
 
 ### Prerequisites
 
-- Go 1.25 or later on the host. The `go.mod` declares `go 1.25.0`. (The `replace` directives in `go.mod` only matter when building from inside the Cowork sandbox; a normal host build resolves through `proxy.golang.org` and is unaffected.)
-- `git` 2.30+.
-- A GitHub account with permission to create or push to the repo you want the agent to drive.
+- A GitHub account with permission to create or push to the repo the
+  agent will drive.
+- Cowork (the desktop client). The sandbox has `git` 2.30+ and
+  `bash` available; you don't install anything inside it.
+- The repo cloned to a path on your machine you can connect as a
+  Cowork folder. HTTPS origin is required (`git@github.com:...`
+  origins won't work — the PAT-injected push URL is HTTPS-only).
 
 ### 1. Create or pick the GitHub repo
 
-The template is meant to be **forked**, so the typical flow is:
+The template is meant to be **forked**. Typical flow:
 
 1. Fork or copy this repository under your own account/org.
-2. Clone it locally to a path you'll add to the bridge allowlist (e.g. `~/coding/my-deployable-thing`).
-3. Confirm the clone uses an `https://github.com/<owner>/<repo>.git` origin — the bridge's PAT injection is for HTTPS only. SSH origins are passed through unchanged and the agent's pushes will fail.
+2. Clone the fork locally to a folder you'll connect to Cowork
+   (e.g. `~/coding/my-deployable-thing`).
+3. Confirm `git remote -v` shows an `https://github.com/<owner>/<repo>.git`
+   origin. If it shows an SSH URL, run
+   `git remote set-url origin https://github.com/<owner>/<repo>.git`.
 
-### 2. Mint a fine-grained PAT
+### 2. Mint a fine-grained PAT (push)
 
-GitHub → Settings → Developer settings → **Fine-grained personal access tokens** → Generate new token.
+GitHub → Settings → Developer settings → **Fine-grained personal
+access tokens** → Generate new token.
 
-- **Repository access:** only the repos you'll list in `CLAUDE_DEPLOYABLE_ALLOWLIST`.
+- **Repository access:** Only select repositories — pick the single
+  fork from step 1.
 - **Permissions** (Repository):
   - Contents: **Read and write** — for pushes.
   - Metadata: **Read-only** — always required.
-  - Actions: **Read-only** — needed in M2 for `ci_wait_for_run` / `ci_logs`. Add it now to avoid a re-issue.
-- **Expiration:** 90 days. An un-rotated token then surfaces as an auth failure instead of a silent risk; rotation is on you.
+  - **Do not** add `Actions: read` to this token. M3's CI proxy uses
+    a separate PAT held on the VPS; keeping them split limits the
+    blast radius if either leaks.
+- **Expiration:** 90 days. An un-rotated token then surfaces as an
+  auth failure rather than a silent risk; rotation is on you. Add a
+  recurring reminder.
 
-Store the value somewhere temporary — you'll paste it into `./.env` (at the repo root) in step 4.
+Copy the token to a temporary buffer — you'll paste it into `.env`
+in step 4.
 
-### 3. Build the bridge and put it on `$PATH`
+### 3. Connect the working folder in Cowork and grant file-delete
 
-From this repo:
+In the Cowork desktop client, open the working folder you cloned in
+step 1 as a connected folder for the session.
+
+Then **grant the file-delete permission** on that folder. The
+sandbox cannot unlink files it didn't create unless this grant is in
+place; without it `git checkout`, `git reset --hard`, and `git gc`
+all fail with `Operation not permitted`. The agent will request
+this grant on first need, but doing it up front avoids the
+interrupt.
+
+In Cowork: when the agent calls `allow_cowork_file_delete`, approve
+it. Or pre-grant by asking the agent to "enable file deletion on
+this folder" before any work starts.
+
+### 4. Populate `.env` at the repo root
 
 ```sh
-go build -o ~/.local/bin/bridge ./cmd/bridge
-```
-
-Confirm `which bridge` resolves and that the binary is executable. The Cowork plugin spec calls `bridge` by basename, so anywhere on `$PATH` is fine.
-
-### 4. Populate `./.env` at the repo root
-
-The fast path is the bootstrap script, which copies `configs/bridge.env.example` to `.env`, rewrites the placeholder allowlist path to this clone's absolute path, and sets mode `0600`:
-
-```sh
-./scripts/bootstrap.sh
-$EDITOR .env   # paste GH_PAT
-```
-
-It refuses to overwrite an existing `.env`. Manual equivalent if the script can't run on your platform:
-
-```sh
-cp configs/bridge.env.example .env
+cp .env.example .env
 chmod 600 .env
 ```
 
-The `.env` is gitignored (see `.gitignore`); the committed reference file is `configs/bridge.env.example`. Living next to the code keeps the PAT one `cd` away from the rest of the project — at the cost that the Cowork sandbox, which mounts the working tree read-only, can read it. Acceptable because the PAT's scope is fine-grained (this repo only, contents+actions); the `~/.claude-deployable/.env` location used in earlier drafts kept the secret host-only at the cost of an extra directory to remember.
+Open `.env` and fill in:
 
-Fields to set (the script handles `CLAUDE_DEPLOYABLE_ALLOWLIST` for you):
+- `GH_PAT` — the token from step 2.
+- `GITHUB_OWNER` — your GitHub username or org (the part before the
+  `/` in the repo URL).
+- `GITHUB_REPO` — the repo name (the part after the `/`).
+- `CLAUDE_AGENT_NAME` / `CLAUDE_AGENT_EMAIL` — leave the defaults
+  (`claude-agent` / `claude-agent@users.noreply.github.com`) unless
+  you have a reason to change them. These end up as `Author:` /
+  `Committer:` on every commit the agent makes.
 
-- `CLAUDE_DEPLOYABLE_ALLOWLIST` — comma-separated absolute paths to the working copies the bridge is allowed to touch. Anything outside this list is rejected with `outside_allowlist`. For a single-repo setup, this is just the absolute path to this repo.
-- `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` — leave as `claude-agent` unless you have a reason to change. These land on every commit the bridge makes.
-- `GH_PAT` — paste the fine-grained PAT from step 2.
+The `.env` is gitignored (see `.gitignore`); the committed reference
+is `.env.example`.
 
-The bridge logs a warning to stderr if the file is not mode `0600`, but it still starts.
+**Why at the repo root?** The Cowork sandbox mounts the working tree
+and the agent runs `git` inside the sandbox. Sourcing one file next
+to the code is one less path the agent has to know about. The
+trade-off — the sandbox can read the PAT — is the same blast radius
+the agent already has via `git push`. PLAN.md's security section
+spells this out.
 
-### 5. Install the Cowork plugin
+### 5. Verify
 
-The plugin lives under `deploy/cowork-plugin/`. Its layout matches Cowork's empirical convention (`.claude-plugin/plugin.json` for metadata, sibling `.mcp.json` for the MCP server registration).
+In a Cowork session connected to the working folder, ask the agent
+something like:
 
-No edits to `.mcp.json` are required for the common case. The bridge discovers its `.env` at startup by walking up from its current working directory looking for a `.git/` entry; if a `.env` sits next to that `.git/`, it's loaded as the bridge config. The discovery order is:
+> Run `git -C "$REPO" status --porcelain` and tell me what `$REPO`
+> resolves to.
 
-1. `$CLAUDE_DEPLOYABLE_ENV` if set — explicit override, used as-is.
-2. `.env` at the root of the nearest enclosing git repo (the common case).
-3. `.env` next to the `bridge` binary (handy if you keep a personal env file alongside the binary in `~/.local/bin/`).
-4. `~/.claude-deployable/.env` — legacy host-only fallback.
+The output should be empty (clean tree) and `$REPO` should be the
+mount path Cowork advertises for the connected folder. If the agent
+can't find `.env`, double-check it's at the repo root, not in
+`configs/` or `~/.claude-deployable/` — bridge-era locations that
+no longer apply.
 
-The `.git/` boundary in step 2 keeps the bridge from accidentally picking up an unrelated `.env` in `$HOME` or `/etc`. If your setup defeats discovery (e.g., Cowork spawns the bridge with cwd outside this repo on your platform), add an explicit override to the plugin's `.mcp.json`:
+### 6. Closeout — make a real change
 
-```json
-{
-  "bridge": {
-    "command": "bridge",
-    "args": [],
-    "env": {
-      "CLAUDE_DEPLOYABLE_ENV": "/Users/you/coding/claude-deployable/.env"
-    }
-  }
-}
-```
+Ask the agent to ship a small edit:
 
-That `env` block is per-machine, so don't commit it back to `main` — leave the path-free version in the template.
+> Edit README.md to fix a typo and ship it.
 
-Install via the Cowork UI's plugin install flow, pointing at the `deploy/cowork-plugin/` directory. After install, restart Cowork (or reload the plugin) so it spawns the bridge.
+The `ship-a-change` skill should trigger and walk through the
+canonical sequence (status → pull → edit → commit → push → report
+SHA). On GitHub, the resulting commit should show:
 
-### 6. Verify
+- Author: `claude-agent <claude-agent@users.noreply.github.com>`
+- Committer: same.
+- The avatar is GitHub's default for noreply commits — there is no
+  bot account, by design.
 
-In a Cowork session targeting the repo you allowlisted, run the `bridge_ping` tool. The result should look roughly like:
+If push fails with `Authentication failed`, the PAT is wrong or
+scoped to the wrong repo — re-check step 2. If it fails with
+`non-fast-forward`, someone else pushed in the gap; re-run the
+sequence (the skill handles one retry).
 
-```json
-{
-  "version": "dev",
-  "config": {
-    "allowlist": ["/Users/you/coding/my-deployable-thing"],
-    "identity_name": "claude-agent",
-    "identity_email": "claude-agent@users.noreply.github.com",
-    "gh_pat_present": true
-  }
-}
-```
+### Rotating the PAT
 
-`gh_pat_present: false` means the bridge couldn't find your PAT in the env file. The PAT itself is **never** included in the response.
+When the 90-day expiry approaches (or any time you suspect leakage):
 
-### 7. Closeout — make a real change
-
-Ask the agent to:
-
-1. Call `git_status` and confirm `state: clean`.
-2. Edit a file (anything — a README typo).
-3. Call `git_commit` with a message and `git_push` to the configured branch.
-4. Open the repo on GitHub and confirm the commit shows up authored as `claude-agent`.
-
-If push fails with `Authentication failed`, the PAT is wrong or scoped to the wrong repo — re-check step 2.
+1. Mint a new PAT with the same scopes (step 2).
+2. Update `GH_PAT=` in `.env`. No restart of anything is needed —
+   the next bash call sources the new value.
+3. Revoke the old PAT in GitHub's UI.
 
 ---
 
 ## Milestone 2 — coming next
 
-CI feedback (`ci_wait_for_run`, `ci_logs`) plus a `services/hello/` dummy container deployed via GitHub Actions. The PAT issued in step 2 already has the `Actions: read` scope it needs, so no new credentials at the M2 boundary.
+GitHub Actions builds a dummy `services/hello/` container and
+deploys it to a VPS over SSH. The PAT issued in step 2 of this
+milestone is **not** the credential used by GHA — GHA uses repo
+secrets and a deploy key. SETUP.md M2 will cover provisioning the
+VPS (sudo user, Docker, GHCR `read:packages` PAT for `docker
+login`, the GHA deploy key + `known_hosts`).
 
 ## Milestone 3 — coming after that
 
-VPS-side agent for container introspection and restart, behind Caddy + TLS, with separate read/write bearer tokens. Requires its own provisioning checklist (sudo user, Docker, GHCR `read:packages` PAT, deploy keys).
+The VPS agent ships, fronted by Caddy + TLS. SETUP.md M3 adds:
+issuing the read + write bearer tokens, minting the **separate**
+`actions:read` PAT for the CI proxy, and adding `ops.<your-domain>`
+to the Cowork outbound allowlist if your fork uses custom egress
+restrictions. The `ship-a-change` skill picks up CI polling and
+post-deploy health checks at this point.
