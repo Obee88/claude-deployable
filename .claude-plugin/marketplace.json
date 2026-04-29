@@ -1,0 +1,14 @@
+{
+  "name": "claude-deployable",
+  "description": "Local marketplace shipped with the claude-deployable template. Lists the bridge plugin so Cowork's 'Add marketplace' can install it directly from this repo with no extra packaging step.",
+  "owner": {
+    "name": "claude-deployable template"
+  },
+  "plugins": [
+    {
+      "name": "claude-deployable-bridge",
+      "source": "./deploy/cowork-plugin",
+      "description": "Host-side git + GitHub-CI MCP server for Cowork agents driving repos in the bridge allowlist."
+    }
+  ]
+}
