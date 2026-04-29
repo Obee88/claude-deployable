@@ -5,11 +5,14 @@ the Cowork sandbox. Multi-step procedures live in `.claude/skills/`;
 this document is the contract for the bash recipes those skills build
 on top of, plus the assumptions the agent must respect.
 
-This file currently covers the **Milestone 1** surface: sandbox-native
-`git` against the mounted working tree. CI tools and the
-`diagnose-ci-failure` skill arrive in M3; the M2 milestone wires up
-GitHub Actions deploys but adds no agent-callable CI surface — until
-M3 lands, CI feedback is "open the GitHub UI and read it yourself."
+This file covers the **Milestone 1** and **Milestone 2** surface:
+sandbox-native `git` against the mounted working tree (M1) plus the
+GitHub-Actions-driven deploy pipeline that builds `services/hello`
+and ships it to the VPS on every push to `main` (M2). M2 adds no
+agent-callable CI surface; until M3's `/ci/*` proxy lands, CI
+feedback is "open the GitHub UI and read it yourself" — the
+`ship-a-change` skill explicitly tells the agent to do that after
+each push.
 
 ---
 
@@ -203,6 +206,72 @@ case where another agent or human pushed in the gap.
 
 ---
 
+---
+
+## Deploy pipeline (M2)
+
+After every push to `main`, two GitHub-Actions workflows fire:
+
+- **`.github/workflows/ci.yml`** — runs `go vet`, `go test -race`, and
+  `go build` against the module. Triggers on every push (any branch)
+  and on PRs targeting `main`. Required-check material — if it goes
+  red, do not merge; fix it on the branch.
+- **`.github/workflows/deploy.yml`** — gated on the repo variable
+  `DEPLOY_ENABLED`. When enabled, it builds the `services/hello`
+  image, pushes it to GHCR (tagged `:<sha>`, `:<short-sha>`,
+  `:main`), then SSHes into the VPS and runs `docker compose pull
+  hello && docker compose up -d hello` against the project at
+  `$VPS_COMPOSE_DIR`. When `DEPLOY_ENABLED` is unset or anything
+  other than the literal string `"true"`, the job reports as
+  *skipped* — that's the intended state until the VPS is provisioned
+  per `SETUP.md` M2.
+
+### Image coordinates
+
+```
+ghcr.io/<github_owner>/<github_repo>/hello:<tag>
+```
+
+where `<tag>` is one of:
+
+- `<full-sha>` — immutable, this is what to pin in compose if you
+  want a manual rollback.
+- `<short-sha>` — same image, easier to read in `docker ps`.
+- `main` — floating, always points to the latest deploy from `main`.
+  This is what `deploy/compose.yml.example` references.
+
+### What the agent should do after a push
+
+1. Capture `head_sha` (step 7 of `ship-a-change`).
+2. Tell the user:
+   - the SHA pushed,
+   - `https://github.com/<owner>/<repo>/commit/<sha>` to view it,
+   - `https://github.com/<owner>/<repo>/actions` to watch CI and
+     deploy.
+3. Stop. **Do not** poll `api.github.com` from the sandbox — it is
+   blocked by the Cowork egress proxy. The `/ci/*` agent-side path
+   ships in M3.
+
+### Failure modes the agent should recognise (M2)
+
+The agent does not read GHA logs in M2, but it will sometimes hear
+about failures from the user. Useful framing for those conversations:
+
+- **CI red on the branch the agent just pushed.** Ask the user to
+  paste the failed step's log. Do not ask the user to "click
+  around"; ask for a copy/paste of the relevant lines.
+- **Deploy job *skipped* on `main` after merge.** Expected before
+  the VPS is provisioned. `SETUP.md` M2 has the flip-on checklist
+  (`DEPLOY_ENABLED=true` repo variable, plus the five `VPS_*`
+  secrets).
+- **Deploy job *failed* on `main`.** Almost always one of: missing
+  / stale secret, `known_hosts` doesn't match the VPS's current
+  host key (rotated key?), or the VPS's compose dir doesn't exist.
+  Do not silently re-run; surface the failure to the user with the
+  step name from the GHA UI.
+
+---
+
 ## What's not here yet
 
 - **CI feedback recipes.** `/ci/runs` and `/ci/runs/{id}/logs` arrive
@@ -210,6 +279,7 @@ case where another agent or human pushed in the gap.
   reports the SHA and the human checks the GitHub Actions UI.
 - **Container recipes.** The VPS agent and its `/containers/*`
   surface arrive in M3. Service ↔ container-name mapping is added to
-  this document at that point.
+  this document at that point — for `services/hello`, the container
+  is named `hello` (see `deploy/compose.yml.example`).
 - **`scripts/ops` CLI.** Ships with the `investigate-service` skill
   in M3.

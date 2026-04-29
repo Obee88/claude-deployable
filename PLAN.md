@@ -39,7 +39,7 @@ Concretely the agent should be able to:
 | VPS agent location | `https://ops.<domain>` fronted by Caddy, Go service on `127.0.0.1:8080` |
 | VPS agent auth | Bearer tokens over HTTPS, separate read vs write tokens. `/ci/*` and `/containers/*` use the read token; `/containers/*/restart` requires the write token |
 | Commit author | Dedicated `claude-agent <claude-agent@users.noreply.github.com>` identity, set per-commit via `GIT_AUTHOR_*` / `GIT_COMMITTER_*` env vars on the bash invocation. No bot GitHub account. Commits will not link to a profile in the GitHub UI, but the author-email pattern makes them easy to grep in `git log` |
-| Push credential | Fine-grained PAT scoped to the single repo, stored in `<repo>/.env` (gitignored, mode `0600`). Injected into the remote URL for the single push (`https://oauth2:$PAT@github.com/<owner>/<repo>.git`) and discarded — never persisted to `.git/config` |
+| Push credential | Fine-grained PAT scoped to the single repo, stored in `<repo>/.env` (gitignored, mode `0600`). Permissions: `contents:write`, `metadata:read`, **`workflows:write`** (the workflows permission is required from M2 onward because the agent ships `.github/workflows/*.yml` updates; GitHub rejects PAT-driven pushes that touch workflow files when this scope is missing). Injected into the remote URL for the single push (`https://oauth2:$PAT@github.com/<owner>/<repo>.git`) and discarded — never persisted to `.git/config` |
 | Actions-read credential | Separate fine-grained PAT scoped to `actions:read` on the same repo, stored on the VPS in the VPS agent's env file. Not present in the sandbox |
 | Branch policy | Direct commits/pushes to `main` — deliberate solo-project choice; moving to a PR flow is an architectural change, not a silent upgrade |
 | Deploy mechanism | `docker compose` with images pulled from GHCR; VPS runs `docker login ghcr.io` once at install time using a `read:packages` PAT. Deploy itself is driven from GitHub Actions over SSH (M2), not from the VPS agent |
@@ -266,10 +266,29 @@ the working tree.
 
 The push PAT is the blast-radius ceiling for a compromised sandbox: a
 fine-grained PAT scoped to the single repo, with only the permissions
-needed to push (`contents:write`, `metadata:read`). A leaked token cannot
-touch other repos and cannot read Actions logs, change settings, or
-trigger workflows. The actions-read PAT — which can read CI logs — lives
-only on the VPS and is never reachable from the sandbox.
+needed to push (`contents:write`, `metadata:read`, and from M2 onward
+`workflows:write`). A leaked token cannot touch other repos and cannot
+read Actions logs or change repo settings. The actions-read PAT — which
+can read CI logs — lives only on the VPS and is never reachable from
+the sandbox.
+
+**Why `workflows:write` is on the push PAT, and what it costs.** GitHub
+forbids PAT-driven pushes from creating or modifying files under
+`.github/workflows/` unless the PAT carries the workflows scope, even
+when `contents:write` is present. M2 requires the agent to ship CI and
+deploy workflows, so the scope is necessary for the agent-driven model.
+The cost: a leaked push PAT can now also rewrite workflow files —
+which can register a malicious workflow that, on its next trigger,
+reads any repo secret available to that workflow. Mitigations the
+template leans on: (a) the PAT's repo scope is still a single repo, so
+the radius is one project, not an org; (b) repo secrets in this
+template are limited to the M2 deploy story (VPS host / user / SSH
+key / known_hosts / compose dir), and the SSH key is itself scoped to
+a sudoless deploy user; (c) the PAT has a 90-day expiration with
+rotation pinned in `SETUP.md`. The alternative — split the workflow-
+push capability into a second PAT — was considered and rejected as
+adding rotation surface without meaningfully shrinking the worst-case
+radius (a leaked sandbox holds both `.env` files anyway).
 
 The VPS continues to be the credential perimeter for the `actions:read`
 PAT, the GHCR `read:packages` PAT, and the bearer tokens. Caddy
@@ -398,7 +417,9 @@ the template.
      push, recovery-only commands flagged as such, single-session
      assumption, single-repo-per-fork assumption.
    - `SETUP.md` — M1 slice: create the GitHub repo, mint the fine-grained
-     push PAT (`contents:write`, `metadata:read` on the single repo),
+     push PAT (`contents:write`, `metadata:read`, `workflows:write`
+     on the single repo — workflows is required from M2 onward, see
+     security section),
      populate `<repo>/.env`, grant `allow_cowork_file_delete` on the
      working folder, smoke-test by running `ship-a-change` end-to-end.
    - `README.md` — elevator pitch + pointers to SETUP.md and AGENTS.md.

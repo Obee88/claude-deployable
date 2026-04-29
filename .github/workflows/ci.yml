@@ -1,0 +1,69 @@
+# claude-deployable CI — milestone 2.
+#
+# Runs on every push to any branch and on every PR targeting main.
+# Verifies the Go module compiles, vets cleanly, and tests pass.
+# This workflow is deliberately stdlib-only-friendly: no linters
+# beyond `go vet`, no third-party actions other than the ones from
+# the actions/* org.
+
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+# Cancel an in-flight CI run for the same ref when a newer push lands.
+# Saves CI minutes on rapid iteration.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: go vet + go test + go build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - name: Tidy check
+        # Fail loudly if go.mod or go.sum is out of date with the
+        # source. Easier to catch here than during a deploy.
+        # Use `git status --porcelain` so an *untracked* go.sum
+        # (which `go mod tidy` would create after adding the first
+        # dependency) is also caught — `git diff` sees tracked
+        # files only.
+        run: |
+          go mod tidy
+          status="$(git status --porcelain go.mod go.sum 2>/dev/null || true)"
+          if [ -n "$status" ]; then
+            echo "::error::go.mod / go.sum changed after 'go mod tidy' — commit the result"
+            echo "--- git status ---"
+            echo "$status"
+            echo "--- git diff (tracked changes only) ---"
+            git diff -- go.mod go.sum || true
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -count=1 ./...
+
+      - name: Build
+        # Final sanity: every package compiles with the same flags
+        # the Docker build uses, modulo CGO which is irrelevant here.
+        run: |
+          CGO_ENABLED=0 go build -trimpath ./...
