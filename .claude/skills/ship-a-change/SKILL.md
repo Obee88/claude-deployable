@@ -34,17 +34,34 @@ land the change on the remote.
 - `.env` exists at the repo root with `GH_PAT`, `GITHUB_OWNER`,
   `GITHUB_REPO`, `CLAUDE_AGENT_NAME`, `CLAUDE_AGENT_EMAIL`. If it
   doesn't, surface the error and point the user at `SETUP.md`.
-- The Cowork session has the `allow_cowork_file_delete` grant on the
-  working folder. Strictly only needed for recovery commands, but if
-  a `pull --ff-only` triggers a checkout that deletes a file, the
-  pull will hard-fail without the grant. Better to surface up front.
 - One Cowork session is active against this clone. There is no
   per-repo mutex; concurrent sessions can race.
+
+The Cowork file-delete grant is **not** a user-arranged
+precondition — step 0 of the procedure below requests it itself.
+Once granted on a folder, the grant persists for the session, so
+re-requesting on an already-granted folder is a cheap no-op.
 
 ## Procedure
 
 `$REPO` is the absolute mount path Cowork advertises for the
 connected folder. Resolve it once at the start of the run.
+
+### 0. Request the file-delete grant
+
+Call `mcp__cowork__allow_cowork_file_delete` on the working folder
+before any `git` invocation. Without it, the sandbox can't unlink
+files inside the working tree — and `git commit` fails mid-flow
+with `fatal: Unable to create '.git/index.lock': File exists` if
+the sandbox can't remove a stale `.git/index.lock`. Same failure
+mode applies if a `pull --ff-only` checkout needs to delete a file.
+
+The grant only applies to the connected working folder, persists
+for the rest of the Cowork session, and is a no-op when already
+granted. So request it unconditionally — don't try to check first.
+
+If the user denies the grant, **stop** and surface that the skill
+can't run safely without it.
 
 ### 1. Source `.env`
 
