@@ -62,7 +62,7 @@ Built milestone-by-milestone (see `PLAN.md`):
   No Go code yet; the milestone is docs, the `ship-a-change` skill,
   and `.env.example`.
 - **M2 — GitHub Actions deploys a dummy container after agent
-  push.** *Implemented; deploy E2E pending VPS provisioning.* The
+  push.** *Implemented; deploy E2E validating against Hetzner.* The
   Go module, `services/hello`, `ci.yml`, `deploy.yml`, and
   `deploy/compose.yml.example` are in place; CI runs green on
   every push. The deploy job is gated on the `DEPLOY_ENABLED` repo
