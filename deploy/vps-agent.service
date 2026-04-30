@@ -1,0 +1,64 @@
+# claude-deployable VPS agent — systemd unit.
+#
+# Installed by deploy/install-vps.sh to /etc/systemd/system/vps-agent.service.
+# The agent runs as the unprivileged `deploy` user (which is in the
+# `docker` group from M2's setup, so it can talk to the docker socket
+# without sudo). Caddy fronts it on ops.<domain> and reverse-proxies
+# to 127.0.0.1:VPS_LISTEN_ADDR.
+#
+# The hardening block below is conservative-by-default: the agent
+# does not write to disk and does not need elevated capabilities.
+# `ProtectHome=read-only` is intentional rather than `tmpfs` —
+# the binary lives at /home/deploy/bin/vps-agent and the env file at
+# /home/deploy/etc/vps-agent.env, both must remain readable.
+
+[Unit]
+Description=claude-deployable VPS agent (Go HTTP service for container + CI ops)
+Documentation=https://github.com/Obee88/claude-deployable
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+
+# Both tokens, the allowlist, the compose dir, and the listen address
+# are read from this file. See configs/vps-agent.env.example. The
+# install script does NOT create this file — operator places it
+# once with mode 0600. systemd will refuse to start the unit if the
+# file is missing, which is what we want (fail loud).
+EnvironmentFile=/home/deploy/etc/vps-agent.env
+
+ExecStart=/home/deploy/bin/vps-agent
+Restart=on-failure
+RestartSec=5
+
+# Drop standard output / error into journald — the agent emits
+# structured JSON via slog, and journald preserves the keys.
+StandardOutput=journal
+StandardError=journal
+
+# --- Hardening ---------------------------------------------------
+# The agent is internet-reachable via Caddy; minimize blast radius
+# in case of a Go runtime CVE or a misuse-of-exec bug.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# Kept open: AF_UNIX (docker socket), AF_INET/INET6 (HTTP listener).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# We need exec() to shell out to /usr/bin/docker; we do NOT need
+# anything more exotic than the default seccomp profile.
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

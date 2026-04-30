@@ -1,0 +1,45 @@
+# claude-deployable — Caddy reverse-proxy example.
+#
+# Drop the relevant blocks into /etc/caddy/Caddyfile on the VPS
+# (replace placeholders), then `sudo systemctl reload caddy`. Caddy
+# provisions a Let's Encrypt cert on first request — DNS for the
+# subdomain must already point at the VPS by then.
+#
+# Conventions used by the M3 install:
+#   - vps-agent listens on 127.0.0.1:8090 (set in vps-agent.env)
+#   - hello listens on 127.0.0.1:8080 (default from M2's compose.yml)
+#
+# Replace REPLACE_ME_DOMAIN with your real apex, e.g. example.com.
+
+# --- VPS agent (private ops surface) -----------------------------
+# This is the host the Cowork-sandboxed Claude agent talks to. The
+# bearer-auth gates are enforced inside the Go agent itself — Caddy
+# is just TLS termination + HTTP/2.
+#
+# `header_up X-Real-IP {remote_host}` lets the agent's access log
+# show the originating IP rather than 127.0.0.1.
+
+ops.REPLACE_ME_DOMAIN {
+	encode gzip
+
+	reverse_proxy 127.0.0.1:8090 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+	}
+
+	# Caddy logs request lines to journald; combine with
+	# `journalctl -u vps-agent` to correlate request IDs.
+	log {
+		format console
+	}
+}
+
+# --- hello (public app) ------------------------------------------
+# Optional. The default M2 setup leaves hello bound to 127.0.0.1:8080
+# without a public hostname; uncomment this block once you have DNS
+# for hello.REPLACE_ME_DOMAIN pointing at the VPS.
+#
+# hello.REPLACE_ME_DOMAIN {
+# 	encode gzip
+# 	reverse_proxy 127.0.0.1:8080
+# }
