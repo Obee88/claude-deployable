@@ -1,0 +1,207 @@
+# claude-deployable deploy-vps-agent — milestone 3.
+#
+# Builds a static linux/amd64 binary from cmd/vps-agent, scps it to
+# the VPS, and asks systemd to swap it in. Mirrors deploy.yml's
+# structure (same SSH secrets, same DEPLOY_ENABLED gate) so the
+# operator only learns one workflow shape.
+#
+# Why this is a separate workflow rather than a job in deploy.yml:
+#   - Different artifact (Go binary vs. docker image, no GHCR push).
+#   - Different change-set (a hello edit shouldn't restart the
+#     agent, and an agent edit shouldn't rebuild hello).
+#   - The `paths:` filter below only fires on agent-relevant files,
+#     keeping main pushes that touch only services/hello cheap.
+#
+# Required secrets — already exist from M2's deploy.yml:
+#   VPS_HOST, VPS_USER, VPS_SSH_KEY, VPS_KNOWN_HOSTS
+#
+# Required variable: DEPLOY_ENABLED == "true". Until the VPS is
+# provisioned and install-vps.sh has run once, leave it unset and
+# this workflow reports as skipped.
+#
+# First-time install (one-time human step):
+#   The deploy workflow only swaps the binary. The systemd unit and
+#   sudoers fragment are installed once by deploy/install-vps.sh
+#   from a real sudo session (operator on their laptop). After
+#   that, the deploy user can `sudo systemctl restart vps-agent`
+#   without password — narrow scope, no general sudo.
+
+name: deploy-vps-agent
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # Source code for the agent itself.
+      - 'cmd/vps-agent/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      # Deploy artifacts that affect the runtime image. (The
+      # systemd unit and install script require a one-time sudo
+      # session to re-deploy; this workflow only touches the
+      # binary, so changes to vps-agent.service won't actually
+      # ship until the operator re-runs install-vps.sh. Listed
+      # here anyway so the deploy run is at least *attempted*
+      # — its summary will note the binary was rolled but the
+      # unit file may need a manual install-vps.sh re-run.)
+      - 'deploy/vps-agent.service'
+      - 'deploy/install-vps.sh'
+      - 'deploy/vps-agent.env.example'
+      - '.github/workflows/deploy-vps-agent.yml'
+  # Manual redeploy after rotating SSH secrets, or to roll the
+  # current main back onto the VPS without a code change.
+  workflow_dispatch:
+
+concurrency:
+  # Two pushes shouldn't race a binary swap on the same VPS. No
+  # cancel-in-progress — let the in-flight run finish so the unit
+  # ends in a known state (with a known binary).
+  group: deploy-vps-agent-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-deploy:
+    name: build static binary, scp, restart unit
+    if: vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - name: Build static linux/amd64 binary
+        # CGO off → fully static, no glibc version pin against the
+        # VPS. -trimpath strips local build paths so the binary
+        # shipped to /home/deploy/bin/vps-agent doesn't leak the
+        # runner's filesystem layout. -s -w drop debug + symbol
+        # info; the agent is small but every kilobyte saves a
+        # millisecond on the SSH copy.
+        # -X main.version=<sha> sets the /healthz banner so a
+        # stuck deploy is visible at a glance.
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          set -euo pipefail
+          go build \
+            -trimpath \
+            -ldflags "-s -w -X main.version=${GITHUB_SHA}" \
+            -o vps-agent \
+            ./cmd/vps-agent
+          # Sanity: prove the binary is statically linked. If
+          # `file` reports "dynamically linked", something is wrong
+          # with CGO_ENABLED / GOFLAGS — fail here, before the scp.
+          file vps-agent
+          file vps-agent | grep -q "statically linked"
+          ls -la vps-agent
+
+      - name: Configure SSH
+        # Same shape as deploy.yml. Bring our own ssh client config
+        # rather than depending on a third-party action so the
+        # supply-chain surface is just actions/* + the ubuntu image.
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: scp binary to VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          # Two-step swap: scp into /tmp first (so a partial copy
+          # never replaces the live binary), then rename into
+          # place. mv across the same filesystem is rename(2) —
+          # atomic, the running process keeps its old inode mmap'd
+          # until restart picks up the new file.
+          scp -i ~/.ssh/deploy_key \
+              -o IdentitiesOnly=yes \
+              -o BatchMode=yes \
+              vps-agent \
+              "${VPS_USER}@${VPS_HOST}:/tmp/vps-agent.new"
+          ssh -i ~/.ssh/deploy_key \
+              -o IdentitiesOnly=yes \
+              -o BatchMode=yes \
+              "${VPS_USER}@${VPS_HOST}" \
+              bash -se <<'EOF'
+          set -euo pipefail
+          install -m 0755 /tmp/vps-agent.new /home/deploy/bin/vps-agent
+          rm -f /tmp/vps-agent.new
+          EOF
+
+      - name: Restart unit
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          # The sudoers fragment scopes this to exactly:
+          #   /bin/systemctl restart vps-agent
+          # NOPASSWD. Anything else => prompts for a password the
+          # workflow does not have, and the step fails.
+          ssh -i ~/.ssh/deploy_key \
+              -o IdentitiesOnly=yes \
+              -o BatchMode=yes \
+              "${VPS_USER}@${VPS_HOST}" \
+              "sudo /bin/systemctl restart vps-agent"
+
+      - name: Smoke test /healthz
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          # /healthz is unauthenticated and bound to 127.0.0.1, so
+          # we curl it from over SSH (NOT from the runner — Caddy
+          # sits in front of the public hostname and that's a
+          # separate concern). The body is "ok <version>\n" — we
+          # check that the version we just built shows up. If it
+          # doesn't, the binary swap silently failed.
+          ssh -i ~/.ssh/deploy_key \
+              -o IdentitiesOnly=yes \
+              -o BatchMode=yes \
+              "${VPS_USER}@${VPS_HOST}" \
+              bash -se <<EOF
+          set -euo pipefail
+          # Give systemd a moment to actually start the new process
+          # before curling — restart can take ~1s on a small VM.
+          sleep 2
+          body="\$(curl -fsS --max-time 3 http://127.0.0.1:8090/healthz)"
+          echo "/healthz body: \$body"
+          # Expect "ok <full-sha>\n". Match on the SHA prefix so a
+          # short-SHA elsewhere doesn't false-fail.
+          case "\$body" in
+            "ok ${GITHUB_SHA}"*) echo "version match"; exit 0 ;;
+            *) echo "::error::healthz did not report SHA ${GITHUB_SHA}"; exit 1 ;;
+          esac
+          EOF
+
+      - name: Summary
+        run: |
+          {
+            echo "### vps-agent deployed"
+            echo ""
+            echo "- binary: \`/home/deploy/bin/vps-agent\` (sha ${GITHUB_SHA})"
+            echo "- unit: \`vps-agent.service\` restarted"
+            echo "- /healthz: ok"
+            echo ""
+            echo "If \`deploy/vps-agent.service\` or \`deploy/install-vps.sh\` changed in this push, those updates require a one-time \`sudo /tmp/install-vps.sh\` re-run from a human sudo session — this workflow does not touch the unit file."
+          } >> "$GITHUB_STEP_SUMMARY"
