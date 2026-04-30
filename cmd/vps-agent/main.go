@@ -25,6 +25,9 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/Obee88/claude-deployable/internal/auth"
+	"github.com/Obee88/claude-deployable/internal/httpx"
 )
 
 // version is overwritten via -ldflags "-X main.version=..." at build
@@ -44,22 +47,22 @@ func addrFromEnv() string {
 	return "127.0.0.1:8080"
 }
 
-// newMux returns the routing tree. Kept as a package-local helper
-// so M3.A.2 can wrap it in middleware (auth, request-id, access
-// log) and M3.A.3 / M3.B can register more routes without
-// disturbing main().
+// newMux returns the routing tree with per-route auth applied.
+// Cross-cutting middleware (request-id, access log) is applied by
+// newHandler; keeping route-level auth here means M3.A.3's
+// /containers/* additions slot in next to the existing ones
+// without touching main().
 //
-// The logger is accepted explicitly rather than reached for via the
-// slog.Default() singleton so handlers that need structured logging
-// can be added with their dependencies threaded through normally.
-func newMux(_ *slog.Logger) *http.ServeMux {
+// The tokens parameter isn't used yet (only /healthz is wired) but
+// is threaded through now so M3.A.3's additions don't need to
+// retro-fit a signature change.
+func newMux(_ *slog.Logger, _ auth.Tokens) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// /healthz is intentionally unauthenticated — it's hit by the
 	// install script's smoke test and by curl-on-laptop sanity
 	// checks. It returns version so a deploy that did not actually
-	// replace the binary becomes visible without needing a write
-	// token.
+	// replace the binary becomes visible without needing a token.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
@@ -67,6 +70,16 @@ func newMux(_ *slog.Logger) *http.ServeMux {
 	})
 
 	return mux
+}
+
+// newHandler wraps the mux in cross-cutting middleware. Order
+// matters: RequestIDMiddleware is outermost so AccessLogMiddleware
+// can reach the ID via context; access log is next so any
+// downstream auth-failure response is still logged.
+func newHandler(logger *slog.Logger, mux *http.ServeMux) http.Handler {
+	return httpx.RequestIDMiddleware(
+		httpx.AccessLogMiddleware(logger)(mux),
+	)
 }
 
 // newLogger builds the structured logger used by main and threaded
@@ -83,11 +96,22 @@ func main() {
 	logger := newLogger()
 	slog.SetDefault(logger)
 
+	// Refuse to start without both tokens. The middleware fails
+	// closed on empty configured tokens, but a missing env var is
+	// almost always a misconfigured deployment — fail loud on
+	// startup instead of letting requests pile up rejected at
+	// runtime.
+	tokens := auth.FromEnv()
+	if tokens.Read == "" || tokens.Write == "" {
+		logger.Error("VPS_READ_TOKEN and VPS_WRITE_TOKEN must both be set")
+		os.Exit(2)
+	}
+
 	addr := addrFromEnv()
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           newMux(logger),
+		Handler:           newHandler(logger, newMux(logger, tokens)),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/Obee88/claude-deployable/internal/auth"
 )
 
 // silentLogger returns a slog.Logger that writes to io.Discard, so
@@ -16,7 +18,7 @@ func silentLogger() *slog.Logger {
 }
 
 func TestHealthz(t *testing.T) {
-	mux := newMux(silentLogger())
+	mux := newMux(silentLogger(), auth.Tokens{Read: "r", Write: "w"})
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
@@ -35,7 +37,7 @@ func TestHealthz(t *testing.T) {
 // (Go 1.22+) rejects POSTs to /healthz with 405. If this regresses,
 // every read endpoint built on the same mux is also at risk.
 func TestHealthzMethodNotAllowed(t *testing.T) {
-	mux := newMux(silentLogger())
+	mux := newMux(silentLogger(), auth.Tokens{Read: "r", Write: "w"})
 
 	req := httptest.NewRequest(http.MethodPost, "/healthz", nil)
 	rec := httptest.NewRecorder()
