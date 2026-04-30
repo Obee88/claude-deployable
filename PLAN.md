@@ -458,33 +458,112 @@ the template.
 
 3. **VPS agent ships with both container and CI surfaces; agent reacts
    to failing CI and unhealthy containers.** Build `cmd/vps-agent`:
-   HTTP on `127.0.0.1:8080`, bearer-gated. Deliverables:
-   - `internal/auth/bearer.go`, `internal/httpx/`, `internal/dockerops/`,
-     `internal/ciops/`.
-   - Container endpoints: `GET /containers`,
+   HTTP on `127.0.0.1:8080`, bearer-gated. Split into three substeps,
+   each ending at a demonstrable artifact (sub-plan adopted
+   2026-04-30).
+
+   **M3.A — Skeleton, install path, container surface.** Outcome: a
+   real `https://ops.<domain>` endpoint, Caddy-fronted, bearer-gated,
+   serving the four `/containers/*` endpoints against the live hello
+   container.
+   - `cmd/vps-agent/main.go` — `net/http` ServeMux, `log/slog` JSON to
+     stdout, graceful shutdown, listens on `127.0.0.1:8080`.
+   - `internal/auth/bearer.go` (constant-time compare, separate read
+     and write tokens), `internal/httpx/` (JSON error envelope,
+     request-id middleware, structured access log),
+     `internal/dockerops/` (shells to `docker ps/logs/inspect` for
+     reads, `docker compose -f <dir>/compose.yml restart <svc>` for
+     restart; service allowlist enforcement; tail/truncate with
+     explicit `[...truncated N bytes]` markers).
+   - Endpoints: `GET /healthz`, `GET /containers`,
      `GET /containers/{name}/logs`, `GET /containers/{name}/health`,
      `POST /containers/{name}/restart`.
-   - CI proxy endpoints: `GET /ci/runs?head_sha=...`,
-     `GET /ci/runs/{id}/logs?failed_only=...`.
-   - `deploy/vps-agent.service`, `deploy/Caddyfile.example`,
-     `deploy/install-vps.sh`, `configs/vps-agent.env.example`.
-   - `.claude/skills/investigate-service/` (with `scripts/ops` CLI).
-   - `.claude/skills/diagnose-ci-failure/` — fetches failed-step logs,
-     classifies, decides retry vs fix vs escalate.
-   - `ship-a-change` upgrades to wait-for-CI + post-deploy-health checks
-     against the VPS agent.
-   - SETUP.md M3 slice: install VPS agent via `install-vps.sh`, wire
-     Caddy, issue the read + write tokens, mint the `actions:read` PAT,
-     add `ops.<domain>` to Cowork's outbound allowlist if the forker has
-     custom egress restrictions.
+   - Deploy artifacts: `deploy/vps-agent.service` (systemd,
+     `User=deploy`, `EnvironmentFile=/home/deploy/etc/vps-agent.env`),
+     `deploy/Caddyfile.example` (reverse_proxy `127.0.0.1:8080`),
+     `deploy/install-vps.sh` (idempotent: installs Caddy if absent,
+     drops the systemd unit + Caddyfile, writes a
+     `sudoers.d/vps-agent` entry granting deploy user
+     `NOPASSWD: /bin/systemctl restart vps-agent` only, reloads —
+     does not touch Docker or recreate the deploy user).
+   - `configs/vps-agent.env.example`: `VPS_READ_TOKEN`,
+     `VPS_WRITE_TOKEN`, `VPS_COMPOSE_DIR`,
+     `VPS_ALLOWED_SERVICES=hello`, `GITHUB_OWNER`, `GITHUB_REPO`,
+     `ACTIONS_READ_PAT=` (stub for M3.B).
+   - `.github/workflows/deploy-vps-agent.yml` — paths-filter on
+     `cmd/vps-agent/**`, `internal/**`, `deploy/vps-agent.service`,
+     `deploy/Caddyfile.example`. Builds static `linux/amd64`, scps
+     to `/tmp`, ssh-runs `mv /tmp/vps-agent
+     /home/deploy/bin/vps-agent && sudo systemctl restart vps-agent`.
+     Reuses the M2 SSH secrets.
+   - `ci.yml` extension: `go vet ./... && go test ./...` exercises the
+     whole module on every push.
+   *Closeout:* curl-tests `/healthz`, `/containers`,
+   `/containers/hello/logs`, `/containers/hello/health`, and
+   `POST /containers/hello/restart` (read token rejected on restart).
+   Push a vps-agent code change; observe `deploy-vps-agent.yml`
+   restarting the unit cleanly.
+
+   **M3.B — CI proxy.** Outcome: the VPS agent serves CI run status
+   and failed-step logs filtered/truncated for agent consumption.
+   - `internal/ciops/` — `net/http` GitHub REST client, no third-party
+     SDK. Runs polled by `head_sha`; logs zip via `archive/zip`;
+     failed-step filter; `tail_lines` + `max_bytes` truncation
+     discipline.
+   - Endpoints: `GET /ci/runs?head_sha=...&timeout_s=...`,
+     `GET /ci/runs/{id}/logs?failed_only=...&tail_lines=...&max_bytes=...`
+     (read-token gated).
+   - Setup: mint a fine-grained `actions:read` PAT for the single
+     repo, populate `ACTIONS_READ_PAT` in
+     `/home/deploy/etc/vps-agent.env`, restart the unit.
+   *Closeout:* `/ci/runs?head_sha=<recent green>` returns a conclusive
+   run JSON; after a deliberate-fail commit,
+   `/ci/runs/{id}/logs?failed_only=true&tail_lines=200` returns failed
+   step logs only with truncation markers as needed.
+
+   **M3.C — Skills, ship-a-change upgrade, docs, full E2E.** Outcome:
+   the agent self-corrects through CI failures and investigates
+   unhealthy containers end-to-end.
+   - `.claude/skills/investigate-service/SKILL.md` plus `scripts/ops`
+     (bash CLI: `ops containers|logs|health|restart`).
+   - `.claude/skills/diagnose-ci-failure/SKILL.md` — failure
+     classification rubric (compile / test / flaky / missing-secret),
+     retry cap of 3, escalate path.
+   - `ship-a-change` M3 upgrade: post-push, poll
+     `/ci/runs?head_sha=<sha>&timeout_s=600`; on green and after
+     `deploy.yml` lands, verify `/containers/hello/health`; on red,
+     trigger `diagnose-ci-failure`.
    - AGENTS.md M3 slice: CI tools, container tools, service↔container
      map.
-   *Closeout:* (a) hand the agent a deliberate-failure edit; it pushes,
-   CI fails, agent reads failed logs via `/ci/*`, fixes the code,
-   pushes again, CI goes green, container redeploys. (b) intentionally
-   kill the hello service's health probe; ask Cowork "what's up with
-   the hello service"; agent runs `investigate-service`, reads logs,
-   restarts, confirms healthy.
+   - SETUP.md M3 slice: subdomain DNS, run `install-vps.sh`, mint
+     `actions:read` PAT, generate read+write bearer tokens, populate
+     `/home/deploy/etc/vps-agent.env`, append `OPS_BASE_URL`,
+     `OPS_READ_TOKEN`, `OPS_WRITE_TOKEN` to `<repo>/.env`, smoke
+     tests.
+   - README status flip: M3 → Shipped on closeout.
+   - `.env.example`: append the three `OPS_*` vars.
+   *Closeout:* (a) deliberate-fail edit → push → CI red →
+   `diagnose-ci-failure` → fix → push → green → deploy → health green;
+   (b) force hello unhealthy (e.g. `docker exec` to break the probe);
+   ask "what's up with hello?"; `investigate-service` reports +
+   restarts + confirms healthy.
+
+   **Cross-cutting M3 decisions** (locked 2026-04-30):
+   - `vps-agent` runs as the existing `deploy` user (already in the
+     `docker` group from M2) — not root, not a new user. The only
+     added privilege is a `sudoers.d/vps-agent` entry:
+     `deploy ALL=(root) NOPASSWD: /bin/systemctl restart vps-agent`.
+   - Paths: `/home/deploy/bin/vps-agent` for the binary,
+     `/home/deploy/etc/vps-agent.env` (mode 0600) for the env file.
+   - No HTTP router library, no docker SDK. `net/http` ServeMux plus
+     `os/exec` of the `docker` CLI. Smaller binary, no version
+     coupling, no proxy-blocked Go deps.
+   - Stdlib-only ambition: `net/http`, `encoding/json`, `archive/zip`
+     (M3.B), `log/slog`, `os/exec`, `crypto/subtle`. No new Go deps
+     unless something forces our hand.
+   - `install-vps.sh` is additive, not destructive: refuses to
+     overwrite Caddyfile/systemd unit unless `--force`. Does not
+     reinstall Docker or recreate the deploy user.
 
 ### Deferred to later / out of scope
 
