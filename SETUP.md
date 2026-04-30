@@ -58,6 +58,12 @@ access tokens** → Generate new token.
 - **Permissions** (Repository):
   - Contents: **Read and write** — for pushes.
   - Metadata: **Read-only** — always required.
+  - Workflows: **Read and write** — required as soon as the agent
+    edits anything under `.github/workflows/` (which it does in M2
+    when shipping `ci.yml` / `deploy.yml`). GitHub rejects pushes
+    that touch workflow files from a PAT lacking this scope, even
+    if Contents:write is present. PLAN.md's security section
+    weighs the trade-off.
   - **Do not** add `Actions: read` to this token. M3's CI proxy uses
     a separate PAT held on the VPS; keeping them split limits the
     blast radius if either leaks.
@@ -157,14 +163,217 @@ When the 90-day expiry approaches (or any time you suspect leakage):
 
 ---
 
-## Milestone 2 — coming next
+## Milestone 2 — GHA builds and deploys a dummy container
 
-GitHub Actions builds a dummy `services/hello/` container and
-deploys it to a VPS over SSH. The PAT issued in step 2 of this
-milestone is **not** the credential used by GHA — GHA uses repo
-secrets and a deploy key. SETUP.md M2 will cover provisioning the
-VPS (sudo user, Docker, GHCR `read:packages` PAT for `docker
-login`, the GHA deploy key + `known_hosts`).
+### What you'll have at the end
+
+- A `services/hello/` Go HTTP server that returns a version banner
+  on `/` and `200 ok` on `/healthz`, packaged in a multi-stage
+  Docker image with a `HEALTHCHECK`.
+- `.github/workflows/ci.yml` running `go vet`, `go test`, `go build`
+  on every push.
+- `.github/workflows/deploy.yml` building the image, pushing it to
+  GHCR, and rolling the VPS container — gated on the `DEPLOY_ENABLED`
+  repo variable so it stays a clean *skip* until the VPS is up.
+- A VPS running Docker, with the deploy key authorised, the GHCR
+  pull credential cached, and `compose.yml` placed at
+  `$VPS_COMPOSE_DIR`.
+- Agent-driven E2E: agent edits a file, ships it via `ship-a-change`,
+  CI runs green, deploy runs green, `curl http://<vps>:8080/healthz`
+  returns `ok` and `curl http://<vps>:8080/` returns the new SHA.
+
+### Provisioning the VPS
+
+The VPS is a Linux box you control. The instructions below assume
+Ubuntu 22.04 / 24.04 LTS but anything that runs Docker works. Run
+each block as root or via `sudo`.
+
+#### a. Create the deploy user
+
+```sh
+adduser --disabled-password --gecos "" deploy
+usermod -aG docker deploy   # docker group must exist after step b
+```
+
+The user does not need passwordless `sudo`; the deploy script only
+runs `docker compose ...`, which works once the user is in the
+`docker` group.
+
+#### b. Install Docker + Compose
+
+Use Docker's official apt repo so `docker compose` (the CLI plugin)
+is available; the older standalone `docker-compose` is not used.
+Pin to a specific channel if your fork has compliance reasons.
+
+```sh
+curl -fsSL https://get.docker.com | sh
+systemctl enable --now docker
+```
+
+Verify with `docker version` and `docker compose version`.
+
+#### c. Mint the GHCR pull PAT and `docker login`
+
+GitHub → Settings → Developer settings → Fine-grained PATs → Generate.
+
+- **Repository access:** all repositories the VPS will ever pull
+  images from. For a single-repo fork that's just this one.
+- **Permissions:** *Packages: Read* only. Nothing else.
+- **Expiration:** 90 days, with a rotation reminder.
+
+On the VPS, as the `deploy` user:
+
+```sh
+echo "<the GHCR PAT>" | docker login ghcr.io -u <github_username> --password-stdin
+```
+
+This caches the credential in `~/.docker/config.json`. Subsequent
+`docker compose pull` calls use it without further interaction.
+
+#### d. Generate a deploy key for GitHub Actions
+
+On any trusted machine (your laptop is fine):
+
+```sh
+ssh-keygen -t ed25519 -N "" -C "claude-deployable-gha" -f /tmp/deploy_key
+```
+
+This produces `/tmp/deploy_key` (private) and `/tmp/deploy_key.pub`
+(public). Keep both off the VPS for now — they go to specific
+places below.
+
+On the **VPS** as the `deploy` user, append the public half to
+`authorized_keys`:
+
+```sh
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+cat <<'EOF' >> ~/.ssh/authorized_keys
+<paste contents of /tmp/deploy_key.pub here>
+EOF
+chmod 600 ~/.ssh/authorized_keys
+```
+
+Optional but recommended: lock the entry down with
+`from="<github-actions-ip-range>",no-agent-forwarding,...` —
+GitHub publishes its current IP ranges at
+`https://api.github.com/meta`. The simpler choice is to leave it
+unrestricted and rely on the key + sudoless deploy user as the
+boundary.
+
+#### e. Capture `known_hosts` for the VPS
+
+From your laptop (a host that already trusts the VPS — verify the
+fingerprint out-of-band the first time):
+
+```sh
+ssh-keyscan -t ed25519,rsa <vps_host> > /tmp/vps_known_hosts
+cat /tmp/vps_known_hosts
+```
+
+Hold on to this file — you'll paste it into the `VPS_KNOWN_HOSTS`
+secret in the next step. If you ever rotate the VPS host key, you
+must re-run this and update the secret, otherwise deploys hang on
+strict host-key checking.
+
+#### f. Place `compose.yml` on the VPS
+
+Pick a directory the `deploy` user owns:
+
+```sh
+mkdir -p /home/deploy/claude-deployable
+cd /home/deploy/claude-deployable
+```
+
+Copy `deploy/compose.yml.example` from the repo to
+`/home/deploy/claude-deployable/compose.yml`, then edit the two
+`REPLACE_ME_*` strings in the `image:` line so the image path
+matches your fork (`ghcr.io/<your-owner>/<your-repo>/hello:main`).
+
+```sh
+docker compose config   # parses the file; fails loud on syntax issues
+```
+
+Don't run `docker compose up -d` yet — there's no image in GHCR
+until deploy.yml runs once.
+
+### Wiring up GitHub Actions
+
+#### g. Set the repo secrets
+
+GitHub repo → Settings → Secrets and variables → Actions → **Secrets** → New repository secret:
+
+| Secret name        | Value                                                    |
+|--------------------|----------------------------------------------------------|
+| `VPS_HOST`         | hostname or IP of the VPS                                |
+| `VPS_USER`         | `deploy` (or whatever name you used in step a)           |
+| `VPS_SSH_KEY`      | full contents of `/tmp/deploy_key` (private half)        |
+| `VPS_KNOWN_HOSTS`  | full contents of `/tmp/vps_known_hosts` from step e      |
+| `VPS_COMPOSE_DIR`  | absolute path on the VPS, e.g. `/home/deploy/claude-deployable` |
+
+Then **delete the local copies**:
+
+```sh
+shred -u /tmp/deploy_key /tmp/deploy_key.pub /tmp/vps_known_hosts
+```
+
+#### h. Set the `DEPLOY_ENABLED` variable
+
+Same UI page → **Variables** tab → New repository variable:
+
+- Name: `DEPLOY_ENABLED`
+- Value: `true`
+
+Until this variable is set to the literal string `true`, every push
+to `main` will enqueue `deploy.yml` but the job will be skipped.
+That's by design — it lets M2 land cleanly before VPS provisioning
+without dirtying the Actions UI with red runs.
+
+### Verify
+
+#### i. CI green
+
+Push any branch (e.g. via `ship-a-change` on a small README edit):
+
+```
+https://github.com/<owner>/<repo>/actions/workflows/ci.yml
+```
+
+`ci` should go green. If `Tidy check` fails, run `go mod tidy`
+locally and commit the result.
+
+#### j. Deploy green
+
+After merging the PR (or pushing to main directly per the project's
+branch policy), watch:
+
+```
+https://github.com/<owner>/<repo>/actions/workflows/deploy.yml
+```
+
+The job should run all five steps (checkout → buildx → GHCR login →
+build & push → SSH deploy) and finish green. On the VPS:
+
+```sh
+docker compose ps hello       # status: running
+docker compose logs hello | tail
+curl -s http://127.0.0.1:8080/healthz   # ok
+curl -s http://127.0.0.1:8080/          # hello from claude-deployable <sha>
+```
+
+The version banner should match `git rev-parse HEAD` on `main`.
+
+### Things that are NOT in M2
+
+- **CI awareness in the agent.** `ship-a-change` still stops after
+  the push and reports the SHA; the agent does not poll
+  `api.github.com`. M3 lands `/ci/*` on the VPS agent.
+- **Container introspection from the agent.** Same story —
+  `/containers/*` arrives in M3 alongside the
+  `investigate-service` skill.
+- **Rollback automation.** Manual: edit `compose.yml` on the VPS to
+  pin a previous SHA tag and `docker compose up -d hello`.
+- **Blue/green or canary.** Out of scope; the deploy is a single
+  rolling restart.
 
 ## Milestone 3 — coming after that
 

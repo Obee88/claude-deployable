@@ -34,10 +34,16 @@ ADR-0002 for why the host bridge was dropped.
   edit→commit→push as one workflow.
 - `.env.example` — the variables the agent expects in `.env`
   (gitignored).
+- `services/hello/` — minimal Go HTTP server (M2) that the deploy
+  pipeline ships to the VPS.
+- `.github/workflows/{ci,deploy}.yml` — `go vet` + `go test` on
+  every push (CI), and build-image → push-to-GHCR → SSH-and-roll
+  on every push to `main` (deploy, gated on the `DEPLOY_ENABLED`
+  repo variable until the VPS is up).
+- `deploy/compose.yml.example` — compose project the VPS uses to
+  run the `hello` container.
 
-M2 introduces a `services/hello/` dummy app, GitHub Actions for CI
-and deploy, and a `deploy/compose.yml.example` for the VPS. M3 adds
-the VPS agent (`cmd/vps-agent/`, `internal/`), the
+M3 adds the VPS agent (`cmd/vps-agent/`, `internal/`), the
 `investigate-service` and `diagnose-ci-failure` skills, and the
 `/ci/*` and `/containers/*` endpoints. A forker who stops after any
 milestone has a coherent, usable subset.
@@ -56,7 +62,12 @@ Built milestone-by-milestone (see `PLAN.md`):
   No Go code yet; the milestone is docs, the `ship-a-change` skill,
   and `.env.example`.
 - **M2 — GitHub Actions deploys a dummy container after agent
-  push.** *Not yet.*
+  push.** *Implemented; deploy E2E pending VPS provisioning.* The
+  Go module, `services/hello`, `ci.yml`, `deploy.yml`, and
+  `deploy/compose.yml.example` are in place; CI runs green on
+  every push. The deploy job is gated on the `DEPLOY_ENABLED` repo
+  variable, so it stays a clean *skip* until a forker walks
+  through the M2 slice of `SETUP.md` and sets the secrets.
 - **M3 — VPS agent ships; agent reacts to failing CI and unhealthy
   containers.** *Not yet.*
 

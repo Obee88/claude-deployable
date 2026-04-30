@@ -1,0 +1,42 @@
+# Example compose project for the VPS side of M2.
+#
+# Copy this file to <VPS_COMPOSE_DIR>/compose.yml on the VPS (the
+# same path you set as the VPS_COMPOSE_DIR repo secret in
+# .github/workflows/deploy.yml). The deploy workflow does
+# `docker compose pull hello && docker compose up -d hello` against
+# this project.
+#
+# `image:` uses the floating `:main` tag so a `pull` always picks up
+# whatever the latest deploy.yml run pushed. The SHA-tagged variant
+# (e.g. ghcr.io/<owner>/<repo>/hello:<sha>) is also published for
+# pinning / rollback if needed; for a manual rollback, edit this
+# file in place to the previous SHA tag and run
+# `docker compose up -d hello`.
+#
+# Replace REPLACE_ME_OWNER and REPLACE_ME_REPO before first deploy.
+
+services:
+  hello:
+    image: ghcr.io/REPLACE_ME_OWNER/REPLACE_ME_REPO/hello:main
+    container_name: hello
+    restart: unless-stopped
+    # Bind to 127.0.0.1 only; Caddy (M3) terminates TLS and proxies.
+    # Until M3, expose to the public via a reverse proxy of your
+    # choice or change the bind to `0.0.0.0:8080:8080` for
+    # smoke-testing — but don't leave it that way.
+    ports:
+      - "127.0.0.1:8080:8080"
+    # The Dockerfile already declares HEALTHCHECK; this block is
+    # commented out so a future override is obvious. Uncomment to
+    # tune per-environment.
+    # healthcheck:
+    #   test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+    #   interval: 30s
+    #   timeout: 3s
+    #   retries: 3
+    #   start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

@@ -1,0 +1,31 @@
+# Keep the docker build context small. The Dockerfile only needs
+# go.mod and services/, but `docker build .` from CI sends the whole
+# repo unless we trim it here.
+
+.git
+.github
+.claude
+.env
+.env.*
+.gitignore
+.dockerignore
+
+# Docs are not in the build context. The Dockerfile is its own copy
+# of the relevant prose.
+*.md
+LICENSE
+
+# Editor / OS cruft (mirrors .gitignore)
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Build outputs (none today; future-proofing)
+bin/
+dist/
+out/
+
+# Deploy artefacts that aren't part of the image
+deploy/
