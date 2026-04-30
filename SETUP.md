@@ -188,18 +188,29 @@ The VPS is a Linux box you control. The instructions below assume
 Ubuntu 22.04 / 24.04 LTS but anything that runs Docker works. Run
 each block as root or via `sudo`.
 
+**Before you provision:** add your laptop's SSH public key to your
+cloud provider's account (e.g. on Hetzner: project → Security → SSH
+Keys → Add SSH Key) **and** select that key on the create-server
+form. Otherwise the new VPS boots with only an emailed root
+password and you'll need a recovery dance (web console paste, or
+"Rebuild" the server with the key selected) before key-based
+`ssh root@<vps>` works. The recipes below assume key auth from the
+moment the box comes up. If you rebuild after generating a key, you
+may also need `ssh-keygen -R <vps_host>` on your laptop to clear a
+stale entry from `known_hosts`.
+
 #### a. Create the deploy user
 
 ```sh
 adduser --disabled-password --gecos "" deploy
-usermod -aG docker deploy   # docker group must exist after step b
 ```
 
 The user does not need passwordless `sudo`; the deploy script only
 runs `docker compose ...`, which works once the user is in the
-`docker` group.
+`docker` group (added in §b, after Docker is installed and the
+group exists).
 
-#### b. Install Docker + Compose
+#### b. Install Docker + Compose, add deploy to the docker group
 
 Use Docker's official apt repo so `docker compose` (the CLI plugin)
 is available; the older standalone `docker-compose` is not used.
@@ -208,27 +219,58 @@ Pin to a specific channel if your fork has compliance reasons.
 ```sh
 curl -fsSL https://get.docker.com | sh
 systemctl enable --now docker
+usermod -aG docker deploy
 ```
 
-Verify with `docker version` and `docker compose version`.
+`usermod` runs *after* the Docker install so the `docker` group
+exists when we add `deploy` to it. Verify:
+
+```sh
+docker version
+docker compose version
+id deploy   # groups should include 'docker'
+```
+
+`docker compose version` (with a space — the v2 CLI plugin) is the
+expected output. The legacy standalone `docker-compose` won't work
+with the v2-syntax `compose.yml` we ship in §f.
 
 #### c. Mint the GHCR pull PAT and `docker login`
 
-GitHub → Settings → Developer settings → Fine-grained PATs → Generate.
+GitHub → Settings → Developer settings → Personal access tokens →
+**Tokens (classic)** → Generate new token (classic).
 
-- **Repository access:** all repositories the VPS will ever pull
-  images from. For a single-repo fork that's just this one.
-- **Permissions:** *Packages: Read* only. Nothing else.
+- **Note:** something descriptive like `claude-deployable-ghcr-pull`.
 - **Expiration:** 90 days, with a rotation reminder.
+- **Scopes:** tick **`read:packages` only** (under the `write:packages`
+  group). Leave everything else unchecked. `read:packages` alone is
+  sufficient for `docker pull`.
 
-On the VPS, as the `deploy` user:
+Why classic and not fine-grained? Fine-grained PATs don't expose a
+per-repo Packages permission, and GHCR's `docker login` flow still
+authenticates through the classic-PAT endpoint. GitHub's own GHCR
+docs endorse this path. If/when fine-grained-PAT support for
+GHCR ships, this section is worth revisiting — until then, a
+narrowly scoped classic PAT (`read:packages` only, no `repo`, no
+`write:packages`) is the smallest blast radius available for a
+pull-only deploy box.
+
+On the VPS, as the `deploy` user (don't put the PAT in shell history
+— `read -s` keeps it out of `~/.bash_history`):
 
 ```sh
-echo "<the GHCR PAT>" | docker login ghcr.io -u <github_username> --password-stdin
+su - deploy
+read -s -p "Paste GHCR PAT and press Enter: " GHCR_PAT
+echo "$GHCR_PAT" | docker login ghcr.io -u <github_username> --password-stdin
+unset GHCR_PAT
 ```
 
-This caches the credential in `~/.docker/config.json`. Subsequent
-`docker compose pull` calls use it without further interaction.
+This caches the credential in `/home/deploy/.docker/config.json`
+(mode 0600). Subsequent `docker compose pull` calls use it without
+further interaction. The "stored unencrypted" warning that prints
+is expected on a server context — credential helpers are a
+laptop-keychain feature, not a VPS one. Mode-0600 plaintext is the
+practical baseline.
 
 #### d. Generate a deploy key for GitHub Actions
 
@@ -260,6 +302,20 @@ GitHub publishes its current IP ranges at
 unrestricted and rely on the key + sudoless deploy user as the
 boundary.
 
+**Verify the deploy key actually authenticates** before stuffing
+the private half into a GHA secret. From your laptop:
+
+```sh
+ssh -i /tmp/deploy_key -o IdentitiesOnly=yes deploy@<vps_host> 'whoami; id; docker ps'
+```
+
+Should print `deploy`, the deploy user's group memberships
+(including `docker`), and an empty `docker ps` table (just the
+header). If you instead get `Permission denied (publickey)`, the
+public-key append in the previous step didn't land — recheck
+`~deploy/.ssh/authorized_keys` on the VPS. Catching this here saves
+a confusing `deploy.yml` failure later.
+
 #### e. Capture `known_hosts` for the VPS
 
 From your laptop (a host that already trusts the VPS — verify the
@@ -268,7 +324,15 @@ fingerprint out-of-band the first time):
 ```sh
 ssh-keyscan -t ed25519,rsa <vps_host> > /tmp/vps_known_hosts
 cat /tmp/vps_known_hosts
+wc -l /tmp/vps_known_hosts
 ```
+
+Expect 2–4 lines: one ed25519 host-key line, one rsa host-key line
+(some Ubuntu 24.04 builds drop rsa, in which case you'll see one
+host-key line), plus optional `# <host>:22 SSH-2.0-...`
+informational comments that OpenSSH ignores. The line count itself
+isn't load-bearing — what matters is that at least one host-key
+line is present.
 
 Hold on to this file — you'll paste it into the `VPS_KNOWN_HOSTS`
 secret in the next step. If you ever rotate the VPS host key, you
@@ -277,24 +341,51 @@ strict host-key checking.
 
 #### f. Place `compose.yml` on the VPS
 
-Pick a directory the `deploy` user owns:
+On the VPS as `deploy`, create the directory:
 
 ```sh
 mkdir -p /home/deploy/claude-deployable
-cd /home/deploy/claude-deployable
 ```
 
-Copy `deploy/compose.yml.example` from the repo to
-`/home/deploy/claude-deployable/compose.yml`, then edit the two
-`REPLACE_ME_*` strings in the `image:` line so the image path
-matches your fork (`ghcr.io/<your-owner>/<your-repo>/hello:main`).
+Then transfer `deploy/compose.yml.example` from your local clone
+to that directory on the VPS. The cleanest path is `scp` from your
+laptop using the deploy key you just generated:
 
 ```sh
-docker compose config   # parses the file; fails loud on syntax issues
+scp -i /tmp/deploy_key \
+  /path/to/your/clone/deploy/compose.yml.example \
+  deploy@<vps_host>:/home/deploy/claude-deployable/compose.yml
 ```
 
-Don't run `docker compose up -d` yet — there's no image in GHCR
-until deploy.yml runs once.
+That copies the template straight to its final path, dropping the
+`.example` suffix. Then on the VPS as `deploy`, substitute the
+placeholders (use `#` as the sed delimiter — the `|` form gets
+mangled in some terminal/chat paste paths because the lines being
+replaced contain no `#`):
+
+```sh
+cd /home/deploy/claude-deployable
+sed -i 's#REPLACE_ME_OWNER/REPLACE_ME_REPO#<your-owner>/<your-repo>#' compose.yml
+grep '^[[:space:]]*image:' compose.yml
+docker compose config | grep image:
+```
+
+Both grep outputs should show
+`image: ghcr.io/<your-owner>/<your-repo>/hello:main`. Use lowercase
+for `<your-owner>` even if your GitHub login has capitals — GHCR
+normalizes container references to lowercase. `docker compose
+config` parses the full project; if the file has YAML errors it
+prints them loudly here rather than at deploy time.
+
+If `sed` fights you for any reason (paste mangling has happened in
+the wild), an equivalent fallback is to overwrite the file with a
+verbatim heredoc — `cat > compose.yml <<'YAML' ... YAML` — using
+the substituted image path inline.
+
+Don't run `docker compose up -d` or `docker compose pull hello`
+yet — the `:main` tag doesn't exist in GHCR until `deploy.yml`
+runs once. Trying now will fail with `manifest unknown` and clutter
+your `docker images` cache with junk.
 
 ### Wiring up GitHub Actions
 
@@ -310,11 +401,28 @@ GitHub repo → Settings → Secrets and variables → Actions → **Secrets** �
 | `VPS_KNOWN_HOSTS`  | full contents of `/tmp/vps_known_hosts` from step e      |
 | `VPS_COMPOSE_DIR`  | absolute path on the VPS, e.g. `/home/deploy/claude-deployable` |
 
-Then **delete the local copies**:
+Then **delete the local copies**.
+
+On Linux (`shred` is GNU coreutils):
 
 ```sh
 shred -u /tmp/deploy_key /tmp/deploy_key.pub /tmp/vps_known_hosts
 ```
+
+On macOS (`shred` doesn't ship), use the BSD equivalent or plain
+`rm`:
+
+```sh
+rm -P /tmp/deploy_key /tmp/deploy_key.pub /tmp/vps_known_hosts
+# or, equivalently for most threat models on APFS:
+# rm /tmp/deploy_key /tmp/deploy_key.pub /tmp/vps_known_hosts
+```
+
+`rm -P` overwrites with three passes before unlinking. On APFS the
+security gain over plain `rm` is mostly theoretical (CoW + SSD FTL
+defeat block-level secure-erase guarantees); both defeat casual
+filesystem-undelete and Time-Machine-restore, which is the actual
+threat model here.
 
 #### h. Set the `DEPLOY_ENABLED` variable
 
