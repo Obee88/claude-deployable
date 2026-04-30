@@ -23,10 +23,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/Obee88/claude-deployable/internal/auth"
+	"github.com/Obee88/claude-deployable/internal/dockerops"
 	"github.com/Obee88/claude-deployable/internal/httpx"
 )
 
@@ -49,14 +51,14 @@ func addrFromEnv() string {
 
 // newMux returns the routing tree with per-route auth applied.
 // Cross-cutting middleware (request-id, access log) is applied by
-// newHandler; keeping route-level auth here means M3.A.3's
-// /containers/* additions slot in next to the existing ones
-// without touching main().
+// newHandler; keeping route-level auth here means M3.B's /ci/*
+// routes can slot in next to the existing /containers/* without
+// touching main().
 //
-// The tokens parameter isn't used yet (only /healthz is wired) but
-// is threaded through now so M3.A.3's additions don't need to
-// retro-fit a signature change.
-func newMux(_ *slog.Logger, _ auth.Tokens) *http.ServeMux {
+// The mgr parameter may be nil — that's the supported way to
+// stand up a container-less mux for tests of the /healthz route
+// or M3.B's CI proxy in isolation.
+func newMux(logger *slog.Logger, tokens auth.Tokens, mgr *dockerops.Manager) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// /healthz is intentionally unauthenticated — it's hit by the
@@ -68,6 +70,10 @@ func newMux(_ *slog.Logger, _ auth.Tokens) *http.ServeMux {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok " + version + "\n"))
 	})
+
+	if mgr != nil {
+		registerContainerRoutes(mux, logger, tokens, mgr)
+	}
 
 	return mux
 }
@@ -92,6 +98,32 @@ func newLogger() *slog.Logger {
 	}))
 }
 
+// dockerManagerFromEnv reads VPS_ALLOWED_SERVICES (comma-separated)
+// and VPS_COMPOSE_DIR. Both must be set in production; refusing to
+// start without them prevents a deployment from silently exposing
+// /containers endpoints with no allowlist (which would fail
+// closed in dockerops anyway, but we'd rather fail loud than
+// pretend to start successfully).
+func dockerManagerFromEnv(_ *slog.Logger) (*dockerops.Manager, error) {
+	raw := os.Getenv("VPS_ALLOWED_SERVICES")
+	allowed := strings.Split(raw, ",")
+	cleaned := allowed[:0]
+	for _, s := range allowed {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			cleaned = append(cleaned, s)
+		}
+	}
+	if len(cleaned) == 0 {
+		return nil, errors.New("VPS_ALLOWED_SERVICES must list at least one service name")
+	}
+	composeDir := os.Getenv("VPS_COMPOSE_DIR")
+	if composeDir == "" {
+		return nil, errors.New("VPS_COMPOSE_DIR must be set")
+	}
+	return dockerops.NewManager(cleaned, composeDir), nil
+}
+
 func main() {
 	logger := newLogger()
 	slog.SetDefault(logger)
@@ -107,11 +139,17 @@ func main() {
 		os.Exit(2)
 	}
 
+	mgr, err := dockerManagerFromEnv(logger)
+	if err != nil {
+		logger.Error("dockerops config invalid", "err", err.Error())
+		os.Exit(2)
+	}
+
 	addr := addrFromEnv()
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           newHandler(logger, newMux(logger, tokens)),
+		Handler:           newHandler(logger, newMux(logger, tokens, mgr)),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
